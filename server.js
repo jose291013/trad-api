@@ -32,14 +32,17 @@ app.use((req, res, next) => {
 
 /* ======================  Auth  ====================== */
 // API publique (hors /admin) via Bearer ${API_TOKEN}
+// API publique (hors /admin) via Bearer ${API_TOKEN}  + whitelist /health, /healthz et /
 const API_TOKEN = process.env.API_TOKEN;
 app.use((req, res, next) => {
   if (req.path.startsWith("/admin")) return next();
+  if (req.path === "/health" || req.path === "/healthz" || req.path === "/") return next();
   if (!API_TOKEN) return next();
   const header = req.get("Authorization") || "";
   if (header === `Bearer ${API_TOKEN}`) return next();
   return res.status(401).json({ error: "Unauthorized" });
 });
+
 
 // Admin via Bearer ${ADMIN_TOKEN} ou ?token=... (pratique en iframe)
 const ADMIN_TOKEN = process.env.ADMIN_TOKEN;
@@ -339,6 +342,9 @@ async function translateWithDeepL({ text, sourceLang, targetLang }) {
 
 /* ======================  Routes publiques  ====================== */
 app.get("/health", (_req, res) => res.send("OK"));
+app.get("/healthz", (_req, res) => res.send("OK"));
+app.get("/", (_req, res) => res.send("OK"));
+
 
 app.get("/dbping", async (_req, res) => {
   try {
@@ -588,6 +594,31 @@ app.post("/admin/api/edit", requireAdmin, async (req, res) => {
     res.status(500).json({ error: e.message });
   }
 });
+// --- Debug: version du build Render
+app.get("/__version", (_req,res)=>{
+  res.json({
+    commit: process.env.RENDER_GIT_COMMIT || null,
+    branch: process.env.RENDER_GIT_BRANCH || null,
+    builtAt: process.env.RENDER_BUILD_TIME || null
+  });
+});
+
+// --- Debug: lister toutes les routes
+function __collectRoutes(app){
+  const routes=[];
+  app._router?.stack?.forEach((m)=>{
+    if(m.route){
+      const methods = Object.keys(m.route.methods).join(",").toUpperCase();
+      routes.push({ path:m.route.path, methods });
+    }
+  });
+  return routes;
+}
+app.get("/__routes", (_req,res)=> res.json(__collectRoutes(app).sort((a,b)=>a.path.localeCompare(b.path))));
+
+// Log dans les logs Render au démarrage
+console.log("Routes:", __collectRoutes(app).map(r=>`${r.methods} ${r.path}`).sort().join(" | "));
+
 
 /* ======================  Boot  ====================== */
 const PORT = Number(process.env.PORT) || 10000;
