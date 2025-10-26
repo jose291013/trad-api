@@ -25,7 +25,7 @@ services:
     name: trad-api
     env: node
     region: frankfurt
-    buildCommand: "npm ci"
+    buildCommand: "npm install"
     startCommand: "node server.js"
     autoDeploy: true
     envVars:
