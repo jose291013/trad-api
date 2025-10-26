@@ -337,18 +337,28 @@ async function logUsage({ provider='none', fromCache=false, chars=0, projectId=p
 async function translateWithDeepL({ text, sourceLang, targetLang }) {
   const key = process.env.DEEPL_API_KEY;
   if (!key) throw new Error('DEEPL_API_KEY missing');
+
+  const url = process.env.DEEPL_API_URL || 'https://api-free.deepl.com/v2/translate';
+
   const body = new URLSearchParams({
-    text, source_lang: sourceLang.toUpperCase(), target_lang: targetLang.toUpperCase(),
+    text,
+    source_lang: sourceLang.toUpperCase(),
+    target_lang: targetLang.toUpperCase(),
   });
-  const r = await fetch('https://api-free.deepl.com/v2/translate', {
+
+  const r = await fetch(url, {
     method: 'POST',
-    headers: { Authorization: `DeepL-Auth-Key ${key}`, 'Content-Type': 'application/x-www-form-urlencoded' },
+    headers: {
+      Authorization: `DeepL-Auth-Key ${key}`,
+      'Content-Type': 'application/x-www-form-urlencoded'
+    },
     body
   });
   if (!r.ok) throw new Error(`DeepL ${r.status} ${await r.text()}`);
   const data = await r.json();
   return data.translations?.[0]?.text || '';
 }
+
 
 /* ========== Routes publiques ========== */
 app.get("/health", (_req, res) => res.send("OK"));
