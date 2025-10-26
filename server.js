@@ -62,8 +62,9 @@ function requireAdmin(req, res, next) {
 }
 
 /* ======================  Back-office HTML  ====================== */
-app.get("/admin", requireAdmin, (_req, res) => {
-  res.type("html").send(`<!doctype html>
+
+// 1) Déclare l'HTML hors de la route, en String.raw pour éviter les surprises
+const ADMIN_HTML = String.raw`<!doctype html>
 <html lang="fr"><head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
@@ -125,11 +126,6 @@ app.get("/admin", requireAdmin, (_req, res) => {
     <span id="pageInfo" class="muted"></span>
     <button id="next">▶</button>
   </div>
-  <div class="row">
-  <button id="refreshStats">Stats (mois courant)</button>
-  <span id="statsInfo" class="muted"></span>
-</div>
-
   </section>
 
   <table id="grid"><thead>
@@ -179,7 +175,8 @@ app.get("/admin", requireAdmin, (_req, res) => {
       const data = await r.json();
       renderRows(data.items || []);
       curPage = data.page; lastPage = data.lastPage;
-      document.getElementById('pageInfo').textContent = 'Page ' + curPage + ' / ' + lastPage + ' — ' + (data.total||0) + ' résultats';
+      document.getElementById('pageInfo').textContent =
+        'Page ' + curPage + ' / ' + lastPage + ' — ' + (data.total||0) + ' résultats';
     }
 
     function pill(status){
@@ -221,9 +218,7 @@ app.get("/admin", requireAdmin, (_req, res) => {
           if (r.ok) { alert('Sauvegardé ✓'); fetchList(); }
           else { const t = await r.text(); alert('Erreur: ' + t); }
         };
-        const tdAct = tr.children[6];
-        tdAct.appendChild(btnSave);
-
+        tr.children[6].appendChild(btnSave);
         tb.appendChild(tr);
       }
     }
@@ -232,7 +227,6 @@ app.get("/admin", requireAdmin, (_req, res) => {
     document.getElementById('prev').onclick = () => { if (curPage>1){curPage--; fetchList();} };
     document.getElementById('next').onclick = () => { if (curPage<lastPage){curPage++; fetchList();} };
 
-    // --- Pilotage du mode (cache-only / cache+deepl) ---
     function renderMode(mode) {
       const span = document.getElementById('modePill');
       if (!span) return;
@@ -260,9 +254,7 @@ app.get("/admin", requireAdmin, (_req, res) => {
           headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + token },
           body: JSON.stringify({ mode })
         });
-        if (!r.ok) {
-          const t = await r.text(); alert('Erreur: ' + t); return;
-        }
+        if (!r.ok) { const t = await r.text(); alert('Erreur: ' + t); return; }
         const data = await r.json();
         renderMode(data.mode);
       } catch (e) { alert('Erreur: ' + e.message); }
@@ -273,29 +265,14 @@ app.get("/admin", requireAdmin, (_req, res) => {
 
     loadMode();
     fetchList();
-    async function loadStatsMonthly(){
-  const d = new Date();
-  const y = d.getFullYear(), m = d.getMonth()+1;
-  const from = `${y}-${String(m).padStart(2,'0')}-01`;
-  // to = dernier jour du mois courant
-  const to = new Date(y, m, 0).toISOString().slice(0,10);
-  const r = await fetch(`/admin/stats?from=${from}&to=${to}`, {
-    headers: { 'Authorization': 'Bearer ' + token }
-  });
-  if(!r.ok){ document.getElementById('statsInfo').textContent = 'Stats: erreur'; return; }
-  const data = await r.json();
-  const deepl = data.totals?.chars_deepl || 0;
-  const cost  = data.totals?.estimated_cost_eur ?? 0;
-  document.getElementById('statsInfo').textContent =
-    `Chars DeepL (mois): ${deepl.toLocaleString()} — coût estimé: ${cost.toFixed(2)} €`;
-}
-document.getElementById('refreshStats').onclick = loadStatsMonthly;
-// charger au boot (optionnel)
-loadStatsMonthly();
-
   </script>
-</body></html>`);
+</body></html>`;
+
+// 2) Servez l’HTML sans template inline
+app.get("/admin", requireAdmin, (_req, res) => {
+  res.type("html").send(ADMIN_HTML);
 });
+
 
 /* ======================  Utils  ====================== */
 const normalizeSource = (str = "") =>
