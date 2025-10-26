@@ -5,6 +5,38 @@ import crypto from "node:crypto";
 
 const app = express();
 app.use(express.json());
+// --- CORS (si tu appelles l'API depuis un navigateur) ---
+import cors from "cors";
+
+// ALLOWED_ORIGINS (ENV) : "https://decoration.ams.v6.pressero.com,https://autre-domaine.fr"
+const allowList = (process.env.ALLOWED_ORIGINS || "")
+  .split(",")
+  .map(s => s.trim())
+  .filter(Boolean);
+
+// regex locales autorisées pour les tests
+const localOK = [/^https?:\/\/localhost(:\d+)?$/, /^https?:\/\/127\.0\.0\.1(:\d+)?$/];
+
+app.use(cors({
+  origin: (origin, cb) => {
+    // Requêtes serveur (Postman, curl) : pas d'origine → on laisse passer
+    if (!origin) return cb(null, true);
+    const ok = localOK.some(rx => rx.test(origin)) || allowList.includes(origin);
+    cb(ok ? null : new Error("CORS blocked"), ok);
+  },
+  credentials: false
+}));
+
+
+// --- Auth simple par jeton ---
+const API_TOKEN = process.env.API_TOKEN; // à définir dans Render
+app.use((req, res, next) => {
+  if (!API_TOKEN) return next();               // si pas défini, on laisse passer (utile en dev)
+  const auth = req.get("Authorization") || ""; // ex: "Bearer abc123"
+  if (auth === `Bearer ${API_TOKEN}`) return next();
+  return res.status(401).json({ error: "Unauthorized" });
+});
+
 
 // -------- utils --------
 const normalizeSource = (str = "") =>
