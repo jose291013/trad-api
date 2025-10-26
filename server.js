@@ -466,6 +466,10 @@ app.post('/translate', async (req, res) => {
     if (!projectId || !sourceLang || !targetLang || !sourceText) {
       return res.status(400).json({ error: 'Missing fields' });
     }
+    const NUMERIC_RX = /^\s*[\d\s\u00A0.,:+\-/%()]*\s*(?:€|EUR|£|GBP|\$|USD|CHF|¥|JPY|₽|PLN|CZK|HUF|SEK|NOK|DKK)?\s*$/i;
+    if (NUMERIC_RX.test(sourceText || '')) {
+      return res.json({ from: 'bypass', text: sourceText });
+    }
 
     // 1) cache
     const sourceNorm = normalizeSource(sourceText);
