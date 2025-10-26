@@ -100,20 +100,27 @@ app.get("/admin", requireAdmin, (_req, res) => {
   </header>
 
   <section class="topbar">
-    <div class="row">
-      <input id="q" class="w-200" placeholder="Recherche texte…" />
-      <select id="status" class="w-120">
-        <option value="">Statut (tous)</option>
-        <option value="auto">auto</option>
-        <option value="approved">approved</option>
-        <option value="review_needed">review_needed</option>
-        <option value="rejected">rejected</option>
-      </select>
-      <input id="from" class="w-80" placeholder="source (fr)" />
-      <input id="to" class="w-80" placeholder="cible (nl)" />
-      <input id="page" class="w-200" placeholder="page_path (contient)" />
-      <button id="search">Rechercher</button>
-    </div>
+  <div class="row">
+    <input id="q" class="w-200" placeholder="Recherche texte…" />
+    <select id="status" class="w-120">
+      <option value="">Statut (tous)</option>
+      <option value="auto">auto</option>
+      <option value="approved">approved</option>
+      <option value="review_needed">review_needed</option>
+      <option value="rejected">rejected</option>
+    </select>
+    <input id="from" class="w-80" placeholder="source (fr)" />
+    <input id="to" class="w-80" placeholder="cible (nl)" />
+    <input id="page" class="w-200" placeholder="page_path (contient)" />
+    <button id="search">Rechercher</button>
+  </div>
+
+  <!-- NOUVEAU : contrôles DeepL -->
+  <div class="row">
+    <span id="modePill" class="pill status-auto">DeepL : …</span>
+    <button id="deeplOn">Activer DeepL</button>
+    <button id="deeplOff">Désactiver DeepL</button>
+  </div>
     <div class="pagination">
       <button id="prev">◀</button>
       <span id="pageInfo" class="muted"></span>
@@ -220,6 +227,55 @@ app.get("/admin", requireAdmin, (_req, res) => {
     document.getElementById('search').onclick = () => { curPage = 1; fetchList(); };
     document.getElementById('prev').onclick = () => { if (curPage>1){curPage--; fetchList();} };
     document.getElementById('next').onclick = () => { if (curPage<lastPage){curPage++; fetchList();} };
+    // --- Pilotage du mode (cache-only / cache+deepl) ---
+  function renderMode(mode) {
+    const span = document.getElementById('modePill');
+    if (!span) return;
+    const on = (mode === 'cache+deepl');
+    span.textContent = 'DeepL : ' + (on ? 'ON' : 'OFF');
+    span.className = 'pill ' + (on ? 'status-approved' : 'status-rejected');
+  }
+
+  async function loadMode() {
+    try {
+      const r = await fetch('/admin/mode', {
+        headers: { 'Authorization': 'Bearer ' + token }
+      });
+      if (!r.ok) throw new Error('HTTP ' + r.status);
+      const data = await r.json();
+      renderMode(data.mode || 'cache-only');
+    } catch (e) {
+      console.error(e);
+      renderMode('cache-only');
+    }
+  }
+
+  async function setMode(mode) {
+    try {
+      const r = await fetch('/admin/mode', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + token },
+        body: JSON.stringify({ mode })
+      });
+      if (!r.ok) {
+        const t = await r.text();
+        alert('Erreur: ' + t);
+        return;
+      }
+      const data = await r.json();
+      renderMode(data.mode);
+    } catch (e) {
+      alert('Erreur: ' + e.message);
+    }
+  }
+
+  // Boutons ON/OFF
+  document.getElementById('deeplOn').onclick  = () => setMode('cache+deepl');
+  document.getElementById('deeplOff').onclick = () => setMode('cache-only');
+
+  // Charger l’état au démarrage
+  loadMode();
+
 
     fetchList();
   </script>
