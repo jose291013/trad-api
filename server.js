@@ -17,15 +17,22 @@ const allowList = (process.env.ALLOWED_ORIGINS || "")
 // regex locales autorisées pour les tests
 const localOK = [/^https?:\/\/localhost(:\d+)?$/, /^https?:\/\/127\.0\.0\.1(:\d+)?$/];
 
-app.use(cors({
+const corsOptions = {
   origin: (origin, cb) => {
-    // Requêtes serveur (Postman, curl) : pas d'origine → on laisse passer
+    // Requêtes serveur (Postman/curl) : pas d'Origin -> OK
     if (!origin) return cb(null, true);
     const ok = localOK.some(rx => rx.test(origin)) || allowList.includes(origin);
     cb(ok ? null : new Error("CORS blocked"), ok);
   },
   credentials: false
-}));
+};
+
+// Bypass CORS pour le back-office (same-origin)
+app.use((req, res, next) => {
+  if (req.path.startsWith("/admin")) return next();
+  return cors(corsOptions)(req, res, next);
+});
+
 
 
 // --- Auth simple par jeton ---
