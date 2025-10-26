@@ -7,50 +7,36 @@ import cors from "cors";
 const app = express();
 app.use(express.json());
 
-/* ======================  CORS  ====================== */
-// ALLOWED_ORIGINS (ENV) : "https://decoration.ams.v6.pressero.com,https://autre-domaine.fr"
+/* ========== CORS ========== */
 const allowList = (process.env.ALLOWED_ORIGINS || "")
-  .split(",")
-  .map(s => s.trim())
-  .filter(Boolean);
+  .split(",").map(s => s.trim()).filter(Boolean);
 const localOK = [/^https?:\/\/localhost(:\d+)?$/, /^https?:\/\/127\.0\.0\.1(:\d+)?$/];
-
 const corsOptions = {
   origin: (origin, cb) => {
-    if (!origin) return cb(null, true); // Postman/curl
+    if (!origin) return cb(null, true);
     const ok = localOK.some(rx => rx.test(origin)) || allowList.includes(origin);
     cb(ok ? null : new Error("CORS blocked"), ok);
   },
   credentials: false
 };
-
-// Bypass CORS pour le back-office (same-origin)
+// Bypass CORS pour /admin
 app.use((req, res, next) => {
   if (req.path.startsWith("/admin")) return next();
   return cors(corsOptions)(req, res, next);
 });
 
-/* ======================  Auth  ====================== */
-// API publique (hors /admin) via Bearer ${API_TOKEN}
-// API publique (hors /admin) via Bearer ${API_TOKEN}  + whitelist /health, /healthz et /
-// remplace ton middleware API publique par :
+/* ========== Auth publique (hors /admin) avec whitelist health ========== */
 const API_TOKEN = process.env.API_TOKEN;
 app.use((req, res, next) => {
   if (req.path.startsWith("/admin")) return next();
-  if (req.path === "/health" || req.path === "/healthz" || req.path === "/") return next();
+  if (["/health", "/healthz", "/"].includes(req.path)) return next();
   if (!API_TOKEN) return next();
   const header = req.get("Authorization") || "";
   if (header === `Bearer ${API_TOKEN}`) return next();
   return res.status(401).json({ error: "Unauthorized" });
 });
 
-app.get("/health", (_req,res)=>res.send("OK"));
-app.get("/healthz", (_req,res)=>res.send("OK"));
-app.get("/", (_req,res)=>res.send("OK"));
-
-
-
-// Admin via Bearer ${ADMIN_TOKEN} ou ?token=... (pratique en iframe)
+/* ========== Auth admin ========== */
 const ADMIN_TOKEN = process.env.ADMIN_TOKEN;
 function requireAdmin(req, res, next) {
   if (!ADMIN_TOKEN) return res.status(500).json({ error: "ADMIN_TOKEN not set" });
@@ -61,9 +47,7 @@ function requireAdmin(req, res, next) {
   return res.status(401).json({ error: "Unauthorized (admin)" });
 }
 
-/* ======================  Back-office HTML  ====================== */
-
-// 1) Déclare l'HTML hors de la route, en String.raw pour éviter les surprises
+/* ========== Back-office HTML (String.raw pour éviter les ${}/backticks) ========== */
 const ADMIN_HTML = String.raw`<!doctype html>
 <html lang="fr"><head>
   <meta charset="utf-8" />
@@ -100,34 +84,33 @@ const ADMIN_HTML = String.raw`<!doctype html>
   </header>
 
   <section class="topbar">
-  <div class="row">
-    <input id="q" class="w-200" placeholder="Recherche texte…" />
-    <select id="status" class="w-120">
-      <option value="">Statut (tous)</option>
-      <option value="auto">auto</option>
-      <option value="approved">approved</option>
-      <option value="review_needed">review_needed</option>
-      <option value="rejected">rejected</option>
-    </select>
-    <input id="from" class="w-80" placeholder="source (fr)" />
-    <input id="to" class="w-80" placeholder="cible (nl)" />
-    <input id="page" class="w-200" placeholder="page_path (contient)" />
-    <button id="search">Rechercher</button>
-  </div>
+    <div class="row">
+      <input id="q" class="w-200" placeholder="Recherche texte…" />
+      <select id="status" class="w-120">
+        <option value="">Statut (tous)</option>
+        <option value="auto">auto</option>
+        <option value="approved">approved</option>
+        <option value="review_needed">review_needed</option>
+        <option value="rejected">rejected</option>
+      </select>
+      <input id="from" class="w-80" placeholder="source (fr)" />
+      <input id="to" class="w-80" placeholder="cible (nl)" />
+      <input id="page" class="w-200" placeholder="page_path (contient)" />
+      <button id="search">Rechercher</button>
+    </div>
 
-  <div class="row">
-    <span id="modePill" class="pill status-auto">DeepL : …</span>
-    <span id="statsPill" class="pill" style="background:#eef">—</span>
+    <div class="row">
+      <span id="modePill" class="pill status-auto">DeepL : …</span>
+      <button id="deeplOn">Activer DeepL</button>
+      <button id="deeplOff">Désactiver DeepL</button>
+      <span id="statsPill" class="pill" style="background:#eef">—</span>
+    </div>
 
-    <button id="deeplOn">Activer DeepL</button>
-    <button id="deeplOff">Désactiver DeepL</button>
-  </div>
-
-  <div class="pagination">
-    <button id="prev">◀</button>
-    <span id="pageInfo" class="muted"></span>
-    <button id="next">▶</button>
-  </div>
+    <div class="pagination">
+      <button id="prev">◀</button>
+      <span id="pageInfo" class="muted"></span>
+      <button id="next">▶</button>
+    </div>
   </section>
 
   <table id="grid"><thead>
@@ -195,6 +178,7 @@ const ADMIN_HTML = String.raw`<!doctype html>
         const tr = document.getElementById('rowTpl').content.firstElementChild.cloneNode(true);
         tr.children[0].textContent = it.source_lang + '→' + it.target_lang;
         tr.children[1].textContent = it.source_text;
+
         const tdTrad = tr.children[2];
         const ta = document.createElement('textarea');
         ta.value = it.translated_text || '';
@@ -225,10 +209,6 @@ const ADMIN_HTML = String.raw`<!doctype html>
       }
     }
 
-    document.getElementById('search').onclick = () => { curPage = 1; fetchList(); };
-    document.getElementById('prev').onclick = () => { if (curPage>1){curPage--; fetchList();} };
-    document.getElementById('next').onclick = () => { if (curPage<lastPage){curPage++; fetchList();} };
-
     function renderMode(mode) {
       const span = document.getElementById('modePill');
       if (!span) return;
@@ -249,6 +229,36 @@ const ADMIN_HTML = String.raw`<!doctype html>
       }
     }
 
+    async function loadStats(){
+      try{
+        const r = await fetch('/admin/stats', { headers: { 'Authorization':'Bearer '+token } });
+        if(!r.ok) throw new Error('HTTP '+r.status);
+        const js = await r.json();
+        const today = js.today || {};
+        const calls = Number(today.deepl_calls || 0);
+        const chars = Number(today.deepl_chars || 0);
+        const hits  = Number(today.cache_hits  || 0);
+        const miss  = Number(today.cache_miss  || 0);
+        const pill = document.getElementById('statsPill');
+        pill.textContent =
+          "Aujourd'hui — DeepL: " + calls +
+          " req / " + chars.toLocaleString() +
+          " car. · Cache: " + hits +
+          " hit / " + miss + " miss";
+      }catch(e){
+        console.error(e);
+        const pill = document.getElementById('statsPill');
+        if(pill) pill.textContent = 'Stats indisponibles';
+      }
+    }
+
+    document.getElementById('search').onclick = () => { curPage = 1; fetchList(); };
+    document.getElementById('prev').onclick = () => { if (curPage>1){curPage--; fetchList();} };
+    document.getElementById('next').onclick = () => { if (curPage<lastPage){curPage++; fetchList();} };
+
+    document.getElementById('deeplOn').onclick  = () => setMode('cache+deepl');
+    document.getElementById('deeplOff').onclick = () => setMode('cache-only');
+
     async function setMode(mode) {
       try {
         const r = await fetch('/admin/mode', {
@@ -262,84 +272,44 @@ const ADMIN_HTML = String.raw`<!doctype html>
       } catch (e) { alert('Erreur: ' + e.message); }
     }
 
-    document.getElementById('deeplOn').onclick  = () => setMode('cache+deepl');
-    document.getElementById('deeplOff').onclick = () => setMode('cache-only');
-    async function loadStats(){
-  try{
-    const r = await fetch('/admin/stats', { headers: { 'Authorization':'Bearer '+token } });
-    if(!r.ok) throw new Error('HTTP '+r.status);
-    const { today } = await r.json();
-    const calls = Number(today.deepl_calls || 0);
-    const chars = Number(today.deepl_chars || 0);
-    const hits  = Number(today.cache_hits  || 0);
-    const miss  = Number(today.cache_miss  || 0);
-    const pill  = document.getElementById('statsPill');
-    // ✅ sûr (quotes + concaténation)
-pill.textContent =
-  "Aujourd'hui — DeepL: " + calls +
-  " req / " + chars.toLocaleString() +
-  " car. · Cache: " + hits +
-  " hit / " + miss + " miss";
-  }catch(e){
-    console.error(e);
-    const pill = document.getElementById('statsPill');
-    if(pill) pill.textContent = 'Stats indisponibles';
-  }
-}
-
-// au démarrage :
-loadMode();
-loadStats();
-fetchList();
-
-
     loadMode();
+    loadStats();
     fetchList();
   </script>
 </body></html>`;
 
-// 2) Servez l’HTML sans template inline
+// Servez l’HTML
 app.get("/admin", requireAdmin, (_req, res) => {
   res.type("html").send(ADMIN_HTML);
 });
 
-
-/* ======================  Utils  ====================== */
+/* ========== Utils ========== */
 const normalizeSource = (str = "") =>
   str.normalize("NFKD").toLowerCase()
-    .replace(/\p{Diacritic}/gu, "")
-    .replace(/\s+/g, " ")
-    .trim();
+    .replace(/\p{Diacritic}/gu, "").replace(/\s+/g, " ").trim();
 
 const makeChecksum = ({ sourceNorm, targetLang, selectorHash = "" }) =>
   crypto.createHash("sha256")
-    .update(`${sourceNorm}::${targetLang}::${selectorHash}`)
-    .digest("hex");
+    .update(`${sourceNorm}::${targetLang}::${selectorHash}`).digest("hex");
 
-/* ======================  DB  ====================== */
+/* ========== DB ========== */
 const makeInternalConn = () => {
-  const h = process.env.DB_HOST;
-  const p = process.env.DB_PORT || "5432";
-  const d = process.env.DB_NAME;
-  const u = process.env.DB_USER;
-  const pw = process.env.DB_PASSWORD;
+  const h = process.env.DB_HOST; const p = process.env.DB_PORT || "5432";
+  const d = process.env.DB_NAME; const u = process.env.DB_USER; const pw = process.env.DB_PASSWORD;
   if (h && d && u && pw) {
     return `postgres://${encodeURIComponent(u)}:${encodeURIComponent(pw)}@${h}:${p}/${d}`;
   }
   return null;
 };
-
 const connectionString =
   process.env.POOL_DATABASE_URL || process.env.DATABASE_URL || makeInternalConn();
-
 if (!connectionString) {
   console.error("❌ No DB connection info (POOL_DATABASE_URL / DATABASE_URL / DB_*).");
   process.exit(1);
 }
-
 const pool = new Pool({ connectionString });
 
-/* ======================  Config mode (DB)  ====================== */
+/* ========== Config mode (DB) ========== */
 async function getMode() {
   const { rows } = await pool.query(
     `SELECT value FROM public.app_config WHERE key='mode' LIMIT 1`
@@ -349,68 +319,41 @@ async function getMode() {
 async function setMode(v) {
   await pool.query(
     `INSERT INTO public.app_config(key,value) VALUES('mode',$1)
-     ON CONFLICT (key) DO UPDATE SET value=EXCLUDED.value`,
-    [v]
+     ON CONFLICT (key) DO UPDATE SET value=EXCLUDED.value`, [v]
   );
 }
-function countChars(s=""){ return [...(s||"")].length; } // gère UTF-16 correctement
 
-async function bumpUsage({
-  day = new Date().toISOString().slice(0,10),
-  projectId,
-  sourceLang,
-  targetLang,
-  fromCache,             // true/false
-  provider = fromCache ? 'none' : 'deepl',
-  chars = 0
-}){
-  await pool.query(`
-    INSERT INTO public.usage_stats(day, project_id, source_lang, target_lang, from_cache, provider, chars_count)
-    VALUES ($1,$2,$3,$4,$5,$6,$7)
-    ON CONFLICT (day, project_id, source_lang, target_lang, from_cache, provider)
-    DO UPDATE SET chars_count = public.usage_stats.chars_count + EXCLUDED.chars_count
-  `, [day, projectId, sourceLang, targetLang, !!fromCache, provider, Math.max(0, chars|0)]);
+/* ========== Usage metrics (réutilise public.usage_stats) ========== */
+async function logUsage({ provider='none', fromCache=false, chars=0, projectId=process.env.PROJECT_ID, sourceLang=null, targetLang=null }) {
+  const day = new Date().toISOString().slice(0,10);
+  await pool.query(
+    `INSERT INTO public.usage_stats(day, project_id, source_lang, target_lang, from_cache, provider, chars_count, created_at)
+     VALUES ($1, $2, $3, $4, $5, $6, $7, now())`,
+    [day, projectId || 'default', sourceLang, targetLang, !!fromCache, provider, Math.max(0, chars|0)]
+  );
 }
 
-
-/* ======================  DeepL  ====================== */
+/* ========== DeepL ========== */
 async function translateWithDeepL({ text, sourceLang, targetLang }) {
   const key = process.env.DEEPL_API_KEY;
   if (!key) throw new Error('DEEPL_API_KEY missing');
-
   const body = new URLSearchParams({
-    text,
-    source_lang: sourceLang.toUpperCase(),
-    target_lang: targetLang.toUpperCase(),
+    text, source_lang: sourceLang.toUpperCase(), target_lang: targetLang.toUpperCase(),
   });
-
   const r = await fetch('https://api-free.deepl.com/v2/translate', {
     method: 'POST',
-    headers: {
-      Authorization: `DeepL-Auth-Key ${key}`,
-      'Content-Type': 'application/x-www-form-urlencoded'
-    },
+    headers: { Authorization: `DeepL-Auth-Key ${key}`, 'Content-Type': 'application/x-www-form-urlencoded' },
     body
   });
   if (!r.ok) throw new Error(`DeepL ${r.status} ${await r.text()}`);
   const data = await r.json();
   return data.translations?.[0]?.text || '';
 }
-// Log d’un “évènement traduction”
-async function logUsage({ provider = 'none', fromCache = false, chars = 0, projectId = process.env.PROJECT_ID, sourceLang = null, targetLang = null }) {
-  await pool.query(
-    `INSERT INTO public.usage_stats(day, project_id, source_lang, target_lang, from_cache, provider, chars_count, created_at)
-     VALUES (CURRENT_DATE, $1, $2, $3, $4, $5, $6, now())`,
-    [projectId || 'default', sourceLang, targetLang, !!fromCache, provider, Number(chars)||0]
-  );
-}
 
-
-/* ======================  Routes publiques  ====================== */
+/* ========== Routes publiques ========== */
 app.get("/health", (_req, res) => res.send("OK"));
 app.get("/healthz", (_req, res) => res.send("OK"));
-app.get("/", (_req, res) => res.send("OK"));
-
+app.get("/", (_req,res)=>res.send("OK"));
 
 app.get("/dbping", async (_req, res) => {
   try {
@@ -429,14 +372,11 @@ app.post("/cache/find", async (req, res) => {
       sourceLang, targetLang, sourceText,
       selectorHash = "",
     } = req.body || {};
-
     if (!projectId || !sourceLang || !targetLang || !sourceText) {
       return res.status(400).json({ error: "Missing fields" });
     }
-
     const sourceNorm = normalizeSource(sourceText);
     const sumHex = makeChecksum({ sourceNorm, targetLang, selectorHash });
-
     const { rows } = await pool.query(
       `SELECT id, source_text, translated_text, status
          FROM translations
@@ -445,7 +385,6 @@ app.post("/cache/find", async (req, res) => {
         LIMIT 1`,
       [projectId, sourceLang, targetLang, sumHex]
     );
-
     res.json({ hit: rows[0] || null });
   } catch (e) {
     console.error(e);
@@ -460,14 +399,11 @@ app.post("/cache/upsert", async (req, res) => {
       sourceLang, targetLang, sourceText, translatedText,
       contextUrl = null, pagePath = null, selectorHash = null,
     } = req.body || {};
-
     if (!projectId || !sourceLang || !targetLang || !sourceText || !translatedText) {
       return res.status(400).json({ error: "Missing fields" });
     }
-
     const sourceNorm = normalizeSource(sourceText);
     const sumHex = makeChecksum({ sourceNorm, targetLang, selectorHash: selectorHash || "" });
-
     const { rows } = await pool.query(
       `INSERT INTO translations(
          project_id, source_lang, target_lang,
@@ -489,7 +425,6 @@ app.post("/cache/upsert", async (req, res) => {
       [projectId, sourceLang, targetLang, sourceText, sourceNorm, translatedText,
        contextUrl, pagePath, selectorHash, sumHex]
     );
-
     res.json({ saved: rows[0] });
   } catch (e) {
     console.error(e);
@@ -497,6 +432,7 @@ app.post("/cache/upsert", async (req, res) => {
   }
 });
 
+/* ========== Orchestrateur: /translate ========== */
 app.post('/translate', async (req, res) => {
   try {
     const {
@@ -520,80 +456,25 @@ app.post('/translate', async (req, res) => {
         LIMIT 1`,
       [projectId, sourceLang, targetLang, sumHex]
     );
-    // -- après le SELECT hit cache :
-if (hit.rows[0]?.translated_text) {
-  // compteur: cache hit
-  await bumpUsage({
-    projectId, sourceLang, targetLang,
-    fromCache: true,
-    provider: 'none',
-    chars: countChars(sourceText) // on compte la demande initiale
-  });
-  return res.json({ from: 'cache', text: hit.rows[0].translated_text });
-}
 
-// -- avant/après l'appel DeepL :
-const mode = await getMode();
-if (mode !== 'cache+deepl') {
-  // compteur: miss (cache-only)
-  await bumpUsage({
-    projectId, sourceLang, targetLang,
-    fromCache: false,
-    provider: 'none',
-    chars: countChars(sourceText)
-  });
-  return res.status(404).json({ error: 'miss', note: 'cache-only mode' });
-}
+    const cachedText = hit.rows[0]?.translated_text;
+    if (cachedText) {
+      await logUsage({ provider: 'cache', fromCache: true, chars: (sourceText || '').length, projectId, sourceLang, targetLang });
+      return res.json({ from: 'cache', text: cachedText });
+    }
 
-const translatedText = await translateWithDeepL({ text: sourceText, sourceLang, targetLang });
+    // 2) DeepL si autorisé
+    const currentMode = await getMode(); // 'cache-only' | 'cache+deepl'
+    if (currentMode !== 'cache+deepl') {
+      await logUsage({ provider: 'none', fromCache: false, chars: 0, projectId, sourceLang, targetLang });
+      return res.status(404).json({ error: 'miss', note: 'cache-only mode' });
+    }
 
-// compteur: provider DeepL
-await bumpUsage({
-  projectId, sourceLang, targetLang,
-  fromCache: false,
-  provider: 'deepl',
-  chars: countChars(sourceText) // on facture côté provider sur l'entrée
-});
-// après le SELECT du cache
-if (hit.rows[0]?.translated_text) {
-  await logUsage({
-    provider: 'cache',
-    fromCache: true,
-    chars: (sourceText || '').length,
-    projectId, sourceLang, targetLang
-  });
-  return res.json({ from: 'cache', text: hit.rows[0].translated_text });
-}
+    const deeplText = await translateWithDeepL({ text: sourceText, sourceLang, targetLang });
+    await logUsage({ provider: 'deepl', fromCache: false, chars: (sourceText || '').length, projectId, sourceLang, targetLang });
 
-// miss de cache
-await logUsage({
-  provider: 'none',
-  fromCache: false,
-  chars: 0,
-  projectId, sourceLang, targetLang
-});
-
-// si mode cache-only => 404 miss (on a déjà loggé la miss)
-const mode = await getMode();
-if (mode !== 'cache+deepl') {
-  return res.status(404).json({ error: 'miss', note: 'cache-only mode' });
-}
-
-// appel DeepL
-const translatedText = await translateWithDeepL({ text: sourceText, sourceLang, targetLang });
-
-// log DeepL
-await logUsage({
-  provider: 'deepl',
-  fromCache: false,
-  chars: (sourceText || '').length,
-  projectId, sourceLang, targetLang
-});
-
-
-
-    // 3) upsert (sauvegarde)
-    const { rows } = await pool.query(
+    // 3) upsert
+    const upsert = await pool.query(
       `INSERT INTO translations(
          project_id, source_lang, target_lang,
          source_text, source_norm, translated_text,
@@ -606,30 +487,26 @@ await logUsage({
              selector_hash   = COALESCE(EXCLUDED.selector_hash,   translations.selector_hash),
              updated_at = now()
        RETURNING translated_text`,
-      [projectId, sourceLang, targetLang, sourceText, sourceNorm, translatedText,
+      [projectId, sourceLang, targetLang, sourceText, sourceNorm, deeplText,
        contextUrl, pagePath, selectorHash, sumHex]
     );
 
-    res.json({ from: 'deepl', text: rows[0].translated_text });
+    const savedText = upsert.rows[0]?.translated_text || deeplText;
+    return res.json({ from: 'deepl', text: savedText });
   } catch (e) {
     console.error('translate error:', e);
-    res.status(500).json({ error: e.message });
+    return res.status(500).json({ error: e.message });
   }
 });
 
-/* ======================  Routes Admin API  ====================== */
-// Lire l’état du mode DeepL
+/* ========== Admin API ========== */
 app.get("/admin/mode", requireAdmin, async (_req, res) => {
   try {
-    const mode = await getMode(); // 'cache-only' | 'cache+deepl'
+    const mode = await getMode();
     res.json({ mode });
-  } catch (e) {
-    console.error(e);
-    res.status(500).json({ error: e.message });
-  }
+  } catch (e) { console.error(e); res.status(500).json({ error: e.message }); }
 });
 
-// Changer l’état du mode DeepL
 app.post("/admin/mode", requireAdmin, async (req, res) => {
   try {
     const { mode } = req.body || {};
@@ -638,13 +515,25 @@ app.post("/admin/mode", requireAdmin, async (req, res) => {
     }
     await setMode(mode);
     res.json({ mode });
-  } catch (e) {
-    console.error(e);
-    res.status(500).json({ error: e.message });
-  }
+  } catch (e) { console.error(e); res.status(500).json({ error: e.message }); }
 });
 
-// Liste paginée + filtres
+// Stats (agrège usage_stats)
+app.get("/admin/stats", requireAdmin, async (_req, res) => {
+  const { rows: todayRows } = await pool.query(
+    `SELECT
+        SUM( (provider='deepl')::int )                               AS deepl_calls,
+        SUM( CASE WHEN provider='deepl' THEN chars_count ELSE 0 END ) AS deepl_chars,
+        SUM( (from_cache=true)::int )                                AS cache_hits,
+        SUM( (from_cache=false AND provider<>'deepl')::int )         AS cache_miss
+     FROM public.usage_stats
+     WHERE day = CURRENT_DATE`
+  );
+  const today = todayRows[0] || { deepl_calls:0, deepl_chars:0, cache_hits:0, cache_miss:0 };
+  res.json({ today });
+});
+
+// Liste paginée
 app.get("/admin/api/translations", requireAdmin, async (req, res) => {
   try {
     const page  = Math.max(1, parseInt(req.query.page ?? "1", 10));
@@ -657,10 +546,7 @@ app.get("/admin/api/translations", requireAdmin, async (req, res) => {
     const to        = (req.query.to ?? "").toString().trim();
     const page_path = (req.query.page_path ?? "").toString().trim();
 
-    const where = ["1=1"];
-    const params = [];
-    let i = 1;
-
+    const where = ["1=1"]; const params = []; let i = 1;
     if (q)        { where.push(`(source_text ILIKE $${i} OR translated_text ILIKE $${i})`); params.push(`%${q}%`); i++; }
     if (status)   { where.push(`status = $${i}`); params.push(status); i++; }
     if (from)     { where.push(`source_lang = $${i}`); params.push(from); i++; }
@@ -668,7 +554,6 @@ app.get("/admin/api/translations", requireAdmin, async (req, res) => {
     if (page_path){ where.push(`page_path ILIKE $${i}`); params.push(`%${page_path}%`); i++; }
 
     const whereSQL = where.join(" AND ");
-
     const { rows: totalRows } = await pool.query(
       `SELECT COUNT(*)::int AS total FROM translations WHERE ${whereSQL}`, params
     );
@@ -691,12 +576,11 @@ app.get("/admin/api/translations", requireAdmin, async (req, res) => {
   }
 });
 
-// Edition d’une traduction
+// Edition
 app.post("/admin/api/edit", requireAdmin, async (req, res) => {
   try {
-    const { id, newText, reviewerEmail = null, reason = null } = req.body || {};
+    const { id, newText } = req.body || {};
     if (!id || !newText) return res.status(400).json({ error: "Missing id or newText" });
-
     const { rowCount } = await pool.query(
       `UPDATE translations
           SET translated_text = $1,
@@ -705,14 +589,6 @@ app.post("/admin/api/edit", requireAdmin, async (req, res) => {
         WHERE id = $2`,
       [newText, id]
     );
-
-    // (optionnel) journalisation dans une table d’audit
-    // await pool.query(
-    //   `INSERT INTO translations_audit(translation_id, reviewer_email, reason, new_text)
-    //    VALUES($1,$2,$3,$4)`,
-    //   [id, reviewerEmail, reason, newText]
-    // );
-
     if (!rowCount) return res.status(404).json({ error: "Not found" });
     res.json({ ok: true });
   } catch (e) {
@@ -720,114 +596,26 @@ app.post("/admin/api/edit", requireAdmin, async (req, res) => {
     res.status(500).json({ error: e.message });
   }
 });
-// --- Debug: version du build Render
-app.get("/__version", (_req,res)=>{
-  res.json({
-    commit: process.env.RENDER_GIT_COMMIT || null,
-    branch: process.env.RENDER_GIT_BRANCH || null,
-    builtAt: process.env.RENDER_BUILD_TIME || null
-  });
-});
 
-// --- Debug: lister toutes les routes
-function __collectRoutes(app){
-  const routes=[];
-  app._router?.stack?.forEach((m)=>{
-    if(m.route){
+/* ========== Debug (facultatif; tu peux retirer plus tard) ========== */
+function __collectRoutes(appRef){
+  const routes=[]; appRef._router?.stack?.forEach(m => {
+    if (m.route) {
       const methods = Object.keys(m.route.methods).join(",").toUpperCase();
-      routes.push({ path:m.route.path, methods });
+      routes.push({ path: m.route.path, methods });
     }
   });
   return routes;
 }
 app.get("/__routes", (_req,res)=> res.json(__collectRoutes(app).sort((a,b)=>a.path.localeCompare(b.path))));
-
-// Log dans les logs Render au démarrage
+app.get("/__version", (_req,res)=> res.json({
+  commit: process.env.RENDER_GIT_COMMIT || null,
+  branch: process.env.RENDER_GIT_BRANCH || null,
+  builtAt: process.env.RENDER_BUILD_TIME || null
+}));
 console.log("Routes:", __collectRoutes(app).map(r=>`${r.methods} ${r.path}`).sort().join(" | "));
 
-// GET /admin/stats?from=2025-10-01&to=2025-10-31&projectId=... (tous par défaut)
-// Ajoute coût estimé via env: DEEPL_COST_PER_MILLION_EUR (ex: "20.0")
-app.get("/admin/stats", requireAdmin, async (req, res) => {
-  try {
-    const from = (req.query.from || "").toString().trim();
-    const to   = (req.query.to   || "").toString().trim();
-    const projectId = (req.query.projectId || "").toString().trim();
-
-    const where = ["1=1"];
-    const params = [];
-    let i = 1;
-
-    if (from) { where.push(`day >= $${i++}`); params.push(from); }
-    if (to)   { where.push(`day <= $${i++}`); params.push(to); }
-    if (projectId) { where.push(`project_id = $${i++}`); params.push(projectId); }
-
-    const sql = `
-      SELECT
-        day, project_id, source_lang, target_lang, from_cache, provider,
-        SUM(chars_count)::int AS chars
-      FROM public.usage_stats
-      WHERE ${where.join(" AND ")}
-      GROUP BY day, project_id, source_lang, target_lang, from_cache, provider
-      ORDER BY day DESC, project_id, source_lang, target_lang
-    `;
-    const { rows } = await pool.query(sql, params);
-
-    // Totaux utiles
-    const totalCharsDeepl = rows
-      .filter(r => r.provider === 'deepl')
-      .reduce((a,b)=>a + (b.chars|0), 0);
-
-    const pricePerMillion = Number(process.env.DEEPL_COST_PER_MILLION_EUR || "0"); // ex: 20
-    const estimatedCostEUR = pricePerMillion > 0
-      ? (totalCharsDeepl / 1_000_000) * pricePerMillion
-      : 0;
-
-    res.json({
-      rows,
-      totals: {
-        chars_deepl: totalCharsDeepl,
-        price_per_million_eur: pricePerMillion,
-        estimated_cost_eur: Number(estimatedCostEUR.toFixed(2))
-      }
-    });
-  } catch (e) {
-    console.error(e);
-    res.status(500).json({ error: e.message });
-  }
-});
-app.get("/admin/stats", requireAdmin, async (_req, res) => {
-  // Stats du jour
-  const { rows: todayRows } = await pool.query(
-    `SELECT
-        SUM( (provider='deepl')::int )                   AS deepl_calls,
-        SUM( CASE WHEN provider='deepl' THEN chars_count ELSE 0 END ) AS deepl_chars,
-        SUM( (from_cache=true)::int )                    AS cache_hits,
-        SUM( (from_cache=false AND provider<>'deepl')::int ) AS cache_miss
-     FROM public.usage_stats
-     WHERE day = CURRENT_DATE`
-  );
-  const today = todayRows[0] || { deepl_calls:0, deepl_chars:0, cache_hits:0, cache_miss:0 };
-
-  // 7 derniers jours (par jour)
-  const { rows: last7 } = await pool.query(
-    `SELECT
-        day::date,
-        SUM( (provider='deepl')::int )                           AS deepl_calls,
-        SUM( CASE WHEN provider='deepl' THEN chars_count ELSE 0 END ) AS deepl_chars,
-        SUM( (from_cache=true)::int )                            AS cache_hits,
-        SUM( (from_cache=false AND provider<>'deepl')::int )     AS cache_miss
-     FROM public.usage_stats
-     WHERE day >= CURRENT_DATE - INTERVAL '6 days'
-     GROUP BY day
-     ORDER BY day ASC`
-  );
-
-  res.json({ today, last7 });
-});
-
-
-
-
-/* ======================  Boot  ====================== */
+/* ========== Boot ========== */
 const PORT = Number(process.env.PORT) || 10000;
 app.listen(PORT, () => console.log(`✅ API up on :${PORT}`));
+
