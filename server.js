@@ -485,7 +485,6 @@ app.post('/translate', async (req, res) => {
     res.status(500).json({ error: e.message });
   }
 });
-
-
+const PORT = Number(process.env.PORT) || 10000;
 
 app.listen(PORT, () => console.log(`✅ API up on :${PORT}`));
