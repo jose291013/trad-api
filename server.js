@@ -425,10 +425,17 @@ if (!hit) {
      LIMIT 1`,
     [projectId, sourceLang, targetLang, sourceNorm]
   );
+  // ...
   hit = rows2[0] || null;
 }
 
 res.json({ hit });
+} catch (e) {
+  console.error(e);
+  res.status(500).json({ error: e.message });
+}
+});
+
 
 
 app.post("/cache/upsert", async (req, res) => {
