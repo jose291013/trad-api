@@ -404,19 +404,32 @@ app.post("/cache/find", async (req, res) => {
     const sourceNorm = normalizeSource(sourceText);
     const sumHex = makeChecksum({ sourceNorm, targetLang, selectorHash });
     const { rows } = await pool.query(
-      `SELECT id, source_text, translated_text, status
-         FROM translations
-        WHERE project_id=$1 AND source_lang=$2 AND target_lang=$3
-          AND checksum = decode($4,'hex')
-        LIMIT 1`,
-      [projectId, sourceLang, targetLang, sumHex]
-    );
-    res.json({ hit: rows[0] || null });
-  } catch (e) {
-    console.error(e);
-    res.status(500).json({ error: e.message });
-  }
-});
+  `SELECT id, source_text, translated_text, status
+   FROM translations
+   WHERE project_id=$1 AND source_lang=$2 AND target_lang=$3
+     AND checksum = decode($4,'hex')
+   LIMIT 1`,
+  [projectId, sourceLang, targetLang, sumHex]
+);
+
+let hit = rows[0] || null;
+
+// 🔁 Fallback si pas trouvé (ignore selectorHash)
+if (!hit) {
+  const { rows: rows2 } = await pool.query(
+    `SELECT id, source_text, translated_text, status
+     FROM translations
+     WHERE project_id=$1 AND source_lang=$2 AND target_lang=$3
+       AND source_norm=$4
+     ORDER BY updated_at DESC
+     LIMIT 1`,
+    [projectId, sourceLang, targetLang, sourceNorm]
+  );
+  hit = rows2[0] || null;
+}
+
+res.json({ hit });
+
 
 app.post("/cache/upsert", async (req, res) => {
   try {
