@@ -2,25 +2,22 @@
 import express from "express";
 import { Pool } from "pg";
 import crypto from "node:crypto";
+import cors from "cors";
 
 const app = express();
 app.use(express.json());
-// --- CORS (si tu appelles l'API depuis un navigateur) ---
-import cors from "cors";
 
+/* ======================  CORS  ====================== */
 // ALLOWED_ORIGINS (ENV) : "https://decoration.ams.v6.pressero.com,https://autre-domaine.fr"
 const allowList = (process.env.ALLOWED_ORIGINS || "")
   .split(",")
   .map(s => s.trim())
   .filter(Boolean);
-
-// regex locales autorisées pour les tests
 const localOK = [/^https?:\/\/localhost(:\d+)?$/, /^https?:\/\/127\.0\.0\.1(:\d+)?$/];
 
 const corsOptions = {
   origin: (origin, cb) => {
-    // Requêtes serveur (Postman/curl) : pas d'Origin -> OK
-    if (!origin) return cb(null, true);
+    if (!origin) return cb(null, true); // Postman/curl
     const ok = localOK.some(rx => rx.test(origin)) || allowList.includes(origin);
     cb(ok ? null : new Error("CORS blocked"), ok);
   },
@@ -33,25 +30,19 @@ app.use((req, res, next) => {
   return cors(corsOptions)(req, res, next);
 });
 
-
-
-// --- Auth simple par jeton ---
-// --- Auth simple par jeton (API publique) ---
+/* ======================  Auth  ====================== */
+// API publique (hors /admin) via Bearer ${API_TOKEN}
 const API_TOKEN = process.env.API_TOKEN;
 app.use((req, res, next) => {
-  // ➜ Laisse passer tout ce qui commence par /admin :
   if (req.path.startsWith("/admin")) return next();
-
   if (!API_TOKEN) return next();
-  const header = req.get("Authorization") || ""; // ex: "Bearer abc123"
+  const header = req.get("Authorization") || "";
   if (header === `Bearer ${API_TOKEN}`) return next();
   return res.status(401).json({ error: "Unauthorized" });
 });
 
-// --- Admin auth (jeton distinct de l'API publique) ---
+// Admin via Bearer ${ADMIN_TOKEN} ou ?token=... (pratique en iframe)
 const ADMIN_TOKEN = process.env.ADMIN_TOKEN;
-
-// accepte Authorization: Bearer <ADMIN_TOKEN> OU ?token=<ADMIN_TOKEN> (pratique pour l’iframe)
 function requireAdmin(req, res, next) {
   if (!ADMIN_TOKEN) return res.status(500).json({ error: "ADMIN_TOKEN not set" });
   const header = req.get("Authorization") || "";
@@ -61,8 +52,7 @@ function requireAdmin(req, res, next) {
   return res.status(401).json({ error: "Unauthorized (admin)" });
 }
 
-
-// --- Page Back-office (HTML) ---
+/* ======================  Back-office HTML  ====================== */
 app.get("/admin", requireAdmin, (_req, res) => {
   res.type("html").send(`<!doctype html>
 <html lang="fr"><head>
@@ -115,17 +105,17 @@ app.get("/admin", requireAdmin, (_req, res) => {
     <button id="search">Rechercher</button>
   </div>
 
-  <!-- NOUVEAU : contrôles DeepL -->
   <div class="row">
     <span id="modePill" class="pill status-auto">DeepL : …</span>
     <button id="deeplOn">Activer DeepL</button>
     <button id="deeplOff">Désactiver DeepL</button>
   </div>
-    <div class="pagination">
-      <button id="prev">◀</button>
-      <span id="pageInfo" class="muted"></span>
-      <button id="next">▶</button>
-    </div>
+
+  <div class="pagination">
+    <button id="prev">◀</button>
+    <span id="pageInfo" class="muted"></span>
+    <button id="next">▶</button>
+  </div>
   </section>
 
   <table id="grid"><thead>
@@ -227,82 +217,65 @@ app.get("/admin", requireAdmin, (_req, res) => {
     document.getElementById('search').onclick = () => { curPage = 1; fetchList(); };
     document.getElementById('prev').onclick = () => { if (curPage>1){curPage--; fetchList();} };
     document.getElementById('next').onclick = () => { if (curPage<lastPage){curPage++; fetchList();} };
+
     // --- Pilotage du mode (cache-only / cache+deepl) ---
-  function renderMode(mode) {
-    const span = document.getElementById('modePill');
-    if (!span) return;
-    const on = (mode === 'cache+deepl');
-    span.textContent = 'DeepL : ' + (on ? 'ON' : 'OFF');
-    span.className = 'pill ' + (on ? 'status-approved' : 'status-rejected');
-  }
-
-  async function loadMode() {
-    try {
-      const r = await fetch('/admin/mode', {
-        headers: { 'Authorization': 'Bearer ' + token }
-      });
-      if (!r.ok) throw new Error('HTTP ' + r.status);
-      const data = await r.json();
-      renderMode(data.mode || 'cache-only');
-    } catch (e) {
-      console.error(e);
-      renderMode('cache-only');
+    function renderMode(mode) {
+      const span = document.getElementById('modePill');
+      if (!span) return;
+      const on = (mode === 'cache+deepl');
+      span.textContent = 'DeepL : ' + (on ? 'ON' : 'OFF');
+      span.className = 'pill ' + (on ? 'status-approved' : 'status-rejected');
     }
-  }
 
-  async function setMode(mode) {
-    try {
-      const r = await fetch('/admin/mode', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + token },
-        body: JSON.stringify({ mode })
-      });
-      if (!r.ok) {
-        const t = await r.text();
-        alert('Erreur: ' + t);
-        return;
+    async function loadMode() {
+      try {
+        const r = await fetch('/admin/mode', { headers: { 'Authorization': 'Bearer ' + token }});
+        if (!r.ok) throw new Error('HTTP ' + r.status);
+        const data = await r.json();
+        renderMode(data.mode || 'cache-only');
+      } catch (e) {
+        console.error(e);
+        renderMode('cache-only');
       }
-      const data = await r.json();
-      renderMode(data.mode);
-    } catch (e) {
-      alert('Erreur: ' + e.message);
     }
-  }
 
-  // Boutons ON/OFF
-  document.getElementById('deeplOn').onclick  = () => setMode('cache+deepl');
-  document.getElementById('deeplOff').onclick = () => setMode('cache-only');
+    async function setMode(mode) {
+      try {
+        const r = await fetch('/admin/mode', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + token },
+          body: JSON.stringify({ mode })
+        });
+        if (!r.ok) {
+          const t = await r.text(); alert('Erreur: ' + t); return;
+        }
+        const data = await r.json();
+        renderMode(data.mode);
+      } catch (e) { alert('Erreur: ' + e.message); }
+    }
 
-  // Charger l’état au démarrage
-  loadMode();
+    document.getElementById('deeplOn').onclick  = () => setMode('cache+deepl');
+    document.getElementById('deeplOff').onclick = () => setMode('cache-only');
 
-
+    loadMode();
     fetchList();
   </script>
 </body></html>`);
 });
 
-
-
-
-
-// -------- utils --------
+/* ======================  Utils  ====================== */
 const normalizeSource = (str = "") =>
-  str
-    .normalize("NFKD")
-    .toLowerCase()
+  str.normalize("NFKD").toLowerCase()
     .replace(/\p{Diacritic}/gu, "")
     .replace(/\s+/g, " ")
     .trim();
 
 const makeChecksum = ({ sourceNorm, targetLang, selectorHash = "" }) =>
-  crypto
-    .createHash("sha256")
+  crypto.createHash("sha256")
     .update(`${sourceNorm}::${targetLang}::${selectorHash}`)
     .digest("hex");
 
-// -------- DB connection --------
-// Construit une URL interne à partir des morceaux fournis par render.yaml
+/* ======================  DB  ====================== */
 const makeInternalConn = () => {
   const h = process.env.DB_HOST;
   const p = process.env.DB_PORT || "5432";
@@ -310,39 +283,37 @@ const makeInternalConn = () => {
   const u = process.env.DB_USER;
   const pw = process.env.DB_PASSWORD;
   if (h && d && u && pw) {
-    return `postgres://${encodeURIComponent(u)}:${encodeURIComponent(
-      pw
-    )}@${h}:${p}/${d}`;
+    return `postgres://${encodeURIComponent(u)}:${encodeURIComponent(pw)}@${h}:${p}/${d}`;
   }
   return null;
 };
 
-// Ordre de priorité : PgBouncer -> DATABASE_URL (si tu l'ajoutes) -> interne reconstituée
 const connectionString =
   process.env.POOL_DATABASE_URL || process.env.DATABASE_URL || makeInternalConn();
 
 if (!connectionString) {
-  console.error(
-    "❌ No DB connection info (POOL_DATABASE_URL / DATABASE_URL / DB_*)."
-  );
+  console.error("❌ No DB connection info (POOL_DATABASE_URL / DATABASE_URL / DB_*).");
   process.exit(1);
 }
 
 const pool = new Pool({ connectionString });
 
-// ---------- Config mode (DB) ----------
+/* ======================  Config mode (DB)  ====================== */
 async function getMode() {
-  const { rows } = await pool.query(`SELECT value FROM public.app_config WHERE key='mode' LIMIT 1`);
+  const { rows } = await pool.query(
+    `SELECT value FROM public.app_config WHERE key='mode' LIMIT 1`
+  );
   return (rows[0]?.value || process.env.TRANSLATION_MODE || 'cache-only').trim();
 }
 async function setMode(v) {
-  await pool.query(`
-    INSERT INTO public.app_config(key,value) VALUES('mode',$1)
-    ON CONFLICT (key) DO UPDATE SET value=EXCLUDED.value
-  `, [v]);
+  await pool.query(
+    `INSERT INTO public.app_config(key,value) VALUES('mode',$1)
+     ON CONFLICT (key) DO UPDATE SET value=EXCLUDED.value`,
+    [v]
+  );
 }
 
-// ---------- Appel DeepL ----------
+/* ======================  DeepL  ====================== */
 async function translateWithDeepL({ text, sourceLang, targetLang }) {
   const key = process.env.DEEPL_API_KEY;
   if (!key) throw new Error('DEEPL_API_KEY missing');
@@ -366,8 +337,7 @@ async function translateWithDeepL({ text, sourceLang, targetLang }) {
   return data.translations?.[0]?.text || '';
 }
 
-
-// -------- routes --------
+/* ======================  Routes publiques  ====================== */
 app.get("/health", (_req, res) => res.send("OK"));
 
 app.get("/dbping", async (_req, res) => {
@@ -384,9 +354,7 @@ app.post("/cache/find", async (req, res) => {
   try {
     const {
       projectId = process.env.PROJECT_ID,
-      sourceLang,
-      targetLang,
-      sourceText,
+      sourceLang, targetLang, sourceText,
       selectorHash = "",
     } = req.body || {};
 
@@ -399,10 +367,10 @@ app.post("/cache/find", async (req, res) => {
 
     const { rows } = await pool.query(
       `SELECT id, source_text, translated_text, status
-       FROM translations
-       WHERE project_id=$1 AND source_lang=$2 AND target_lang=$3
-         AND checksum = decode($4,'hex')
-       LIMIT 1`,
+         FROM translations
+        WHERE project_id=$1 AND source_lang=$2 AND target_lang=$3
+          AND checksum = decode($4,'hex')
+        LIMIT 1`,
       [projectId, sourceLang, targetLang, sumHex]
     );
 
@@ -413,18 +381,12 @@ app.post("/cache/find", async (req, res) => {
   }
 });
 
-// --- cache/upsert (garde l’API existante pour renseigner la DB depuis un proxy/snippet) ---
 app.post("/cache/upsert", async (req, res) => {
   try {
     const {
       projectId = process.env.PROJECT_ID,
-      sourceLang,
-      targetLang,
-      sourceText,
-      translatedText,
-      contextUrl = null,
-      pagePath = null,
-      selectorHash = null,
+      sourceLang, targetLang, sourceText, translatedText,
+      contextUrl = null, pagePath = null, selectorHash = null,
     } = req.body || {};
 
     if (!projectId || !sourceLang || !targetLang || !sourceText || !translatedText) {
@@ -432,44 +394,28 @@ app.post("/cache/upsert", async (req, res) => {
     }
 
     const sourceNorm = normalizeSource(sourceText);
-    const sumHex = makeChecksum({
-      sourceNorm,
-      targetLang,
-      selectorHash: selectorHash || "",
-    });
+    const sumHex = makeChecksum({ sourceNorm, targetLang, selectorHash: selectorHash || "" });
 
     const { rows } = await pool.query(
-      `
-      INSERT INTO translations(
-        project_id, source_lang, target_lang,
-        source_text, source_norm, translated_text,
-        context_url, page_path, selector_hash,
-        checksum, status
-      ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9, decode($10,'hex'), 'auto')
-      ON CONFLICT (project_id, source_lang, target_lang, checksum)
-      DO UPDATE SET
-        translated_text = CASE
-          WHEN NOT translations.is_locked THEN EXCLUDED.translated_text
-          ELSE translations.translated_text
-        END,
-        context_url   = COALESCE(EXCLUDED.context_url, translations.context_url),
-        page_path     = COALESCE(EXCLUDED.page_path, translations.page_path),
-        selector_hash = COALESCE(EXCLUDED.selector_hash, translations.selector_hash),
-        updated_at = now()
-      RETURNING *;
-      `,
-      [
-        projectId,
-        sourceLang,
-        targetLang,
-        sourceText,
-        sourceNorm,
-        translatedText,
-        contextUrl,
-        pagePath,
-        selectorHash,
-        sumHex,
-      ]
+      `INSERT INTO translations(
+         project_id, source_lang, target_lang,
+         source_text, source_norm, translated_text,
+         context_url, page_path, selector_hash,
+         checksum, status
+       ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9, decode($10,'hex'), 'auto')
+       ON CONFLICT (project_id, source_lang, target_lang, checksum)
+       DO UPDATE SET
+         translated_text = CASE
+           WHEN NOT translations.is_locked THEN EXCLUDED.translated_text
+           ELSE translations.translated_text
+         END,
+         context_url   = COALESCE(EXCLUDED.context_url, translations.context_url),
+         page_path     = COALESCE(EXCLUDED.page_path, translations.page_path),
+         selector_hash = COALESCE(EXCLUDED.selector_hash, translations.selector_hash),
+         updated_at = now()
+       RETURNING *;`,
+      [projectId, sourceLang, targetLang, sourceText, sourceNorm, translatedText,
+       contextUrl, pagePath, selectorHash, sumHex]
     );
 
     res.json({ saved: rows[0] });
@@ -479,7 +425,6 @@ app.post("/cache/upsert", async (req, res) => {
   }
 });
 
-// ---------- Orchestrateur: cache -> DeepL (si autorisé) -> upsert ----------
 app.post('/translate', async (req, res) => {
   try {
     const {
@@ -498,9 +443,9 @@ app.post('/translate', async (req, res) => {
 
     const hit = await pool.query(
       `SELECT translated_text FROM translations
-       WHERE project_id=$1 AND source_lang=$2 AND target_lang=$3
-         AND checksum=decode($4,'hex')
-       LIMIT 1`,
+        WHERE project_id=$1 AND source_lang=$2 AND target_lang=$3
+          AND checksum=decode($4,'hex')
+        LIMIT 1`,
       [projectId, sourceLang, targetLang, sumHex]
     );
     if (hit.rows[0]?.translated_text) {
@@ -513,9 +458,7 @@ app.post('/translate', async (req, res) => {
       return res.status(404).json({ error: 'miss', note: 'cache-only mode' });
     }
 
-    const translatedText = await translateWithDeepL({
-      text: sourceText, sourceLang, targetLang
-    });
+    const translatedText = await translateWithDeepL({ text: sourceText, sourceLang, targetLang });
 
     // 3) upsert (sauvegarde)
     const { rows } = await pool.query(
@@ -541,6 +484,111 @@ app.post('/translate', async (req, res) => {
     res.status(500).json({ error: e.message });
   }
 });
-const PORT = Number(process.env.PORT) || 10000;
 
+/* ======================  Routes Admin API  ====================== */
+// Lire l’état du mode DeepL
+app.get("/admin/mode", requireAdmin, async (_req, res) => {
+  try {
+    const mode = await getMode(); // 'cache-only' | 'cache+deepl'
+    res.json({ mode });
+  } catch (e) {
+    console.error(e);
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// Changer l’état du mode DeepL
+app.post("/admin/mode", requireAdmin, async (req, res) => {
+  try {
+    const { mode } = req.body || {};
+    if (!['cache-only', 'cache+deepl'].includes(mode)) {
+      return res.status(400).json({ error: "mode must be 'cache-only' or 'cache+deepl'" });
+    }
+    await setMode(mode);
+    res.json({ mode });
+  } catch (e) {
+    console.error(e);
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// Liste paginée + filtres
+app.get("/admin/api/translations", requireAdmin, async (req, res) => {
+  try {
+    const page  = Math.max(1, parseInt(req.query.page ?? "1", 10));
+    const limit = Math.min(100, Math.max(1, parseInt(req.query.limit ?? "25", 10)));
+    const offset = (page - 1) * limit;
+
+    const q         = (req.query.q ?? "").toString().trim();
+    const status    = (req.query.status ?? "").toString().trim();
+    const from      = (req.query.from ?? "").toString().trim();
+    const to        = (req.query.to ?? "").toString().trim();
+    const page_path = (req.query.page_path ?? "").toString().trim();
+
+    const where = ["1=1"];
+    const params = [];
+    let i = 1;
+
+    if (q)        { where.push(`(source_text ILIKE $${i} OR translated_text ILIKE $${i})`); params.push(`%${q}%`); i++; }
+    if (status)   { where.push(`status = $${i}`); params.push(status); i++; }
+    if (from)     { where.push(`source_lang = $${i}`); params.push(from); i++; }
+    if (to)       { where.push(`target_lang = $${i}`); params.push(to); i++; }
+    if (page_path){ where.push(`page_path ILIKE $${i}`); params.push(`%${page_path}%`); i++; }
+
+    const whereSQL = where.join(" AND ");
+
+    const { rows: totalRows } = await pool.query(
+      `SELECT COUNT(*)::int AS total FROM translations WHERE ${whereSQL}`, params
+    );
+    const total = totalRows[0]?.total ?? 0;
+
+    const { rows: items } = await pool.query(
+      `SELECT id, source_lang, target_lang, source_text, translated_text, status, page_path, updated_at
+         FROM translations
+        WHERE ${whereSQL}
+        ORDER BY updated_at DESC
+        LIMIT ${limit} OFFSET ${offset}`,
+      params
+    );
+
+    const lastPage = Math.max(1, Math.ceil(total / limit));
+    res.json({ page, lastPage, total, items });
+  } catch (e) {
+    console.error(e);
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// Edition d’une traduction
+app.post("/admin/api/edit", requireAdmin, async (req, res) => {
+  try {
+    const { id, newText, reviewerEmail = null, reason = null } = req.body || {};
+    if (!id || !newText) return res.status(400).json({ error: "Missing id or newText" });
+
+    const { rowCount } = await pool.query(
+      `UPDATE translations
+          SET translated_text = $1,
+              status = COALESCE(NULLIF(status,''),'approved'),
+              updated_at = now()
+        WHERE id = $2`,
+      [newText, id]
+    );
+
+    // (optionnel) journalisation dans une table d’audit
+    // await pool.query(
+    //   `INSERT INTO translations_audit(translation_id, reviewer_email, reason, new_text)
+    //    VALUES($1,$2,$3,$4)`,
+    //   [id, reviewerEmail, reason, newText]
+    // );
+
+    if (!rowCount) return res.status(404).json({ error: "Not found" });
+    res.json({ ok: true });
+  } catch (e) {
+    console.error(e);
+    res.status(500).json({ error: e.message });
+  }
+});
+
+/* ======================  Boot  ====================== */
+const PORT = Number(process.env.PORT) || 10000;
 app.listen(PORT, () => console.log(`✅ API up on :${PORT}`));
