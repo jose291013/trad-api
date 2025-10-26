@@ -117,6 +117,8 @@ const ADMIN_HTML = String.raw`<!doctype html>
 
   <div class="row">
     <span id="modePill" class="pill status-auto">DeepL : …</span>
+    <span id="statsPill" class="pill" style="background:#eef">—</span>
+
     <button id="deeplOn">Activer DeepL</button>
     <button id="deeplOff">Désactiver DeepL</button>
   </div>
@@ -262,6 +264,29 @@ const ADMIN_HTML = String.raw`<!doctype html>
 
     document.getElementById('deeplOn').onclick  = () => setMode('cache+deepl');
     document.getElementById('deeplOff').onclick = () => setMode('cache-only');
+    async function loadStats(){
+  try{
+    const r = await fetch('/admin/stats', { headers: { 'Authorization':'Bearer '+token } });
+    if(!r.ok) throw new Error('HTTP '+r.status);
+    const { today } = await r.json();
+    const calls = Number(today.deepl_calls || 0);
+    const chars = Number(today.deepl_chars || 0);
+    const hits  = Number(today.cache_hits  || 0);
+    const miss  = Number(today.cache_miss  || 0);
+    const pill  = document.getElementById('statsPill');
+    pill.textContent = `Aujourd'hui — DeepL: ${calls} req / ${chars.toLocaleString()} car. · Cache: ${hits} hit / ${miss} miss`;
+  }catch(e){
+    console.error(e);
+    const pill = document.getElementById('statsPill');
+    if(pill) pill.textContent = 'Stats indisponibles';
+  }
+}
+
+// au démarrage :
+loadMode();
+loadStats();
+fetchList();
+
 
     loadMode();
     fetchList();
@@ -366,6 +391,15 @@ async function translateWithDeepL({ text, sourceLang, targetLang }) {
   const data = await r.json();
   return data.translations?.[0]?.text || '';
 }
+// Log d’un “évènement traduction”
+async function logUsage({ provider = 'none', fromCache = false, chars = 0, projectId = process.env.PROJECT_ID, sourceLang = null, targetLang = null }) {
+  await pool.query(
+    `INSERT INTO public.usage_stats(day, project_id, source_lang, target_lang, from_cache, provider, chars_count, created_at)
+     VALUES (CURRENT_DATE, $1, $2, $3, $4, $5, $6, now())`,
+    [projectId || 'default', sourceLang, targetLang, !!fromCache, provider, Number(chars)||0]
+  );
+}
+
 
 /* ======================  Routes publiques  ====================== */
 app.get("/health", (_req, res) => res.send("OK"));
@@ -515,6 +549,42 @@ await bumpUsage({
   provider: 'deepl',
   chars: countChars(sourceText) // on facture côté provider sur l'entrée
 });
+// après le SELECT du cache
+if (hit.rows[0]?.translated_text) {
+  await logUsage({
+    provider: 'cache',
+    fromCache: true,
+    chars: (sourceText || '').length,
+    projectId, sourceLang, targetLang
+  });
+  return res.json({ from: 'cache', text: hit.rows[0].translated_text });
+}
+
+// miss de cache
+await logUsage({
+  provider: 'none',
+  fromCache: false,
+  chars: 0,
+  projectId, sourceLang, targetLang
+});
+
+// si mode cache-only => 404 miss (on a déjà loggé la miss)
+const mode = await getMode();
+if (mode !== 'cache+deepl') {
+  return res.status(404).json({ error: 'miss', note: 'cache-only mode' });
+}
+
+// appel DeepL
+const translatedText = await translateWithDeepL({ text: sourceText, sourceLang, targetLang });
+
+// log DeepL
+await logUsage({
+  provider: 'deepl',
+  fromCache: false,
+  chars: (sourceText || '').length,
+  projectId, sourceLang, targetLang
+});
+
 
 
     // 3) upsert (sauvegarde)
@@ -720,6 +790,36 @@ app.get("/admin/stats", requireAdmin, async (req, res) => {
     res.status(500).json({ error: e.message });
   }
 });
+app.get("/admin/stats", requireAdmin, async (_req, res) => {
+  // Stats du jour
+  const { rows: todayRows } = await pool.query(
+    `SELECT
+        SUM( (provider='deepl')::int )                   AS deepl_calls,
+        SUM( CASE WHEN provider='deepl' THEN chars_count ELSE 0 END ) AS deepl_chars,
+        SUM( (from_cache=true)::int )                    AS cache_hits,
+        SUM( (from_cache=false AND provider<>'deepl')::int ) AS cache_miss
+     FROM public.usage_stats
+     WHERE day = CURRENT_DATE`
+  );
+  const today = todayRows[0] || { deepl_calls:0, deepl_chars:0, cache_hits:0, cache_miss:0 };
+
+  // 7 derniers jours (par jour)
+  const { rows: last7 } = await pool.query(
+    `SELECT
+        day::date,
+        SUM( (provider='deepl')::int )                           AS deepl_calls,
+        SUM( CASE WHEN provider='deepl' THEN chars_count ELSE 0 END ) AS deepl_chars,
+        SUM( (from_cache=true)::int )                            AS cache_hits,
+        SUM( (from_cache=false AND provider<>'deepl')::int )     AS cache_miss
+     FROM public.usage_stats
+     WHERE day >= CURRENT_DATE - INTERVAL '6 days'
+     GROUP BY day
+     ORDER BY day ASC`
+  );
+
+  res.json({ today, last7 });
+});
+
 
 
 
