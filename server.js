@@ -274,6 +274,43 @@ if (!connectionString) {
 
 const pool = new Pool({ connectionString });
 
+// ---------- Config mode (DB) ----------
+async function getMode() {
+  const { rows } = await pool.query(`SELECT value FROM public.app_config WHERE key='mode' LIMIT 1`);
+  return (rows[0]?.value || process.env.TRANSLATION_MODE || 'cache-only').trim();
+}
+async function setMode(v) {
+  await pool.query(`
+    INSERT INTO public.app_config(key,value) VALUES('mode',$1)
+    ON CONFLICT (key) DO UPDATE SET value=EXCLUDED.value
+  `, [v]);
+}
+
+// ---------- Appel DeepL ----------
+async function translateWithDeepL({ text, sourceLang, targetLang }) {
+  const key = process.env.DEEPL_API_KEY;
+  if (!key) throw new Error('DEEPL_API_KEY missing');
+
+  const body = new URLSearchParams({
+    text,
+    source_lang: sourceLang.toUpperCase(),
+    target_lang: targetLang.toUpperCase(),
+  });
+
+  const r = await fetch('https://api-free.deepl.com/v2/translate', {
+    method: 'POST',
+    headers: {
+      Authorization: `DeepL-Auth-Key ${key}`,
+      'Content-Type': 'application/x-www-form-urlencoded'
+    },
+    body
+  });
+  if (!r.ok) throw new Error(`DeepL ${r.status} ${await r.text()}`);
+  const data = await r.json();
+  return data.translations?.[0]?.text || '';
+}
+
+
 // -------- routes --------
 app.get("/health", (_req, res) => res.send("OK"));
 
@@ -320,6 +357,7 @@ app.post("/cache/find", async (req, res) => {
   }
 });
 
+// --- cache/upsert (garde l’API existante pour renseigner la DB depuis un proxy/snippet) ---
 app.post("/cache/upsert", async (req, res) => {
   try {
     const {
@@ -385,123 +423,69 @@ app.post("/cache/upsert", async (req, res) => {
   }
 });
 
-// -------- start --------
-const PORT = process.env.PORT || 10000;
-// --- Liste paginée + filtres ---
-app.get("/admin/api/translations", requireAdmin, async (req, res) => {
+// ---------- Orchestrateur: cache -> DeepL (si autorisé) -> upsert ----------
+app.post('/translate', async (req, res) => {
   try {
-    const projectId = process.env.PROJECT_ID;
-    if (!projectId) return res.status(500).json({ error: "PROJECT_ID missing" });
+    const {
+      projectId = process.env.PROJECT_ID,
+      sourceLang, targetLang, sourceText,
+      contextUrl = null, pagePath = null, selectorHash = null
+    } = req.body || {};
 
-    const page = Math.max(1, parseInt(req.query.page || "1", 10));
-    const limit = Math.min(100, Math.max(1, parseInt(req.query.limit || "25", 10)));
-    const offset = (page - 1) * limit;
-
-    const q = (req.query.q || "").trim();
-    const status = (req.query.status || "").trim();
-    const from = (req.query.from || "").trim();
-    const to = (req.query.to || "").trim();
-    const pagePath = (req.query.page_path || "").trim();
-
-    const cond = ["project_id = $1"];
-    const args = [projectId];
-    let i = 2;
-
-    if (status) { cond.push(`status = $${i++}`); args.push(status); }
-    if (from) { cond.push(`source_lang = $${i++}`); args.push(from); }
-    if (to) { cond.push(`target_lang = $${i++}`); args.push(to); }
-    if (pagePath) { cond.push(`page_path ILIKE $${i++}`); args.push('%' + pagePath + '%'); }
-    if (q) {
-      cond.push(`(source_text ILIKE $${i} OR translated_text ILIKE $${i})`);
-      args.push('%' + q + '%'); i++;
+    if (!projectId || !sourceLang || !targetLang || !sourceText) {
+      return res.status(400).json({ error: 'Missing fields' });
     }
 
-    const where = cond.length ? ('WHERE ' + cond.join(' AND ')) : '';
-    const sql = `
-      SELECT id, source_lang, target_lang, source_text, translated_text,
-             status, page_path, updated_at
-      FROM translations
-      ${where}
-      ORDER BY updated_at DESC
-      LIMIT ${limit} OFFSET ${offset};
-    `;
-    const countSql = `SELECT count(*)::int AS n FROM translations ${where};`;
+    // 1) cache
+    const sourceNorm = normalizeSource(sourceText);
+    const sumHex = makeChecksum({ sourceNorm, targetLang, selectorHash: selectorHash || '' });
 
-    const [{ rows }, countRes] = await Promise.all([
-      pool.query(sql, args),
-      pool.query(countSql, args)
-    ]);
+    const hit = await pool.query(
+      `SELECT translated_text FROM translations
+       WHERE project_id=$1 AND source_lang=$2 AND target_lang=$3
+         AND checksum=decode($4,'hex')
+       LIMIT 1`,
+      [projectId, sourceLang, targetLang, sumHex]
+    );
+    if (hit.rows[0]?.translated_text) {
+      return res.json({ from: 'cache', text: hit.rows[0].translated_text });
+    }
 
-    const total = countRes.rows[0]?.n || 0;
-    res.json({
-      page, limit, total,
-      lastPage: Math.max(1, Math.ceil(total / limit)),
-      items: rows
+    // 2) DeepL si autorisé
+    const mode = await getMode(); // 'cache-only' | 'cache+deepl'
+    if (mode !== 'cache+deepl') {
+      return res.status(404).json({ error: 'miss', note: 'cache-only mode' });
+    }
+
+    const translatedText = await translateWithDeepL({
+      text: sourceText, sourceLang, targetLang
     });
-  } catch (e) {
-    console.error(e);
-    res.status(500).json({ error: e.message });
-  }
-});
 
-// --- Édition (log + lock) ---
-// --- Édition (log + lock) — version robuste avec transaction ---
-app.post("/admin/api/edit", requireAdmin, async (req, res) => {
-  const client = await pool.connect();
-  try {
-    const { id, newText, reviewerEmail = "unknown", reason = null } = req.body || {};
-    if (!id || !newText) return res.status(400).json({ error: "Missing id/newText" });
-
-    await client.query("BEGIN");
-
-    // Permet au trigger d'avoir l'info du relecteur
-    await client.query(`SELECT set_config('app.user',$1,true)`, [reviewerEmail]);
-
-    // 1) Met à jour la traduction (lock + approved)
-    const { rows } = await client.query(
-      `
-      UPDATE translations
-         SET translated_text = $1,
-             status = 'approved',
-             is_locked = true,
+    // 3) upsert (sauvegarde)
+    const { rows } = await pool.query(
+      `INSERT INTO translations(
+         project_id, source_lang, target_lang,
+         source_text, source_norm, translated_text,
+         context_url, page_path, selector_hash, checksum, status
+       ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,decode($10,'hex'),'auto')
+       ON CONFLICT (project_id,source_lang,target_lang,checksum) DO UPDATE
+         SET translated_text = COALESCE(EXCLUDED.translated_text, translations.translated_text),
+             context_url     = COALESCE(EXCLUDED.context_url,     translations.context_url),
+             page_path       = COALESCE(EXCLUDED.page_path,       translations.page_path),
+             selector_hash   = COALESCE(EXCLUDED.selector_hash,   translations.selector_hash),
              updated_at = now()
-       WHERE id = $2
-      RETURNING id;
-      `,
-      [newText, id]
+       RETURNING translated_text`,
+      [projectId, sourceLang, targetLang, sourceText, sourceNorm, translatedText,
+       contextUrl, pagePath, selectorHash, sumHex]
     );
 
-    const t = rows[0];
-
-    // 2) Si un motif est fourni, on essaie de le poser sur la DERNIÈRE révision créée
-    if (t && reason) {
-      await client.query(
-        `
-        UPDATE translation_revisions tr
-           SET change_reason = $1
-          FROM (
-            SELECT id
-              FROM translation_revisions
-             WHERE translation_id = $2
-             ORDER BY changed_at DESC
-             LIMIT 1
-          ) last
-         WHERE tr.id = last.id;
-        `,
-        [reason, t.id]
-      );
-    }
-
-    await client.query("COMMIT");
-    res.json({ updated: t || null });
+    res.json({ from: 'deepl', text: rows[0].translated_text });
   } catch (e) {
-    try { await client.query("ROLLBACK"); } catch {}
-    console.error("admin/edit error:", e);
+    console.error('translate error:', e);
     res.status(500).json({ error: e.message });
-  } finally {
-    client.release();
   }
 });
+
 
 
 app.listen(PORT, () => console.log(`✅ API up on :${PORT}`));
