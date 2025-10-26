@@ -274,7 +274,12 @@ const ADMIN_HTML = String.raw`<!doctype html>
     const hits  = Number(today.cache_hits  || 0);
     const miss  = Number(today.cache_miss  || 0);
     const pill  = document.getElementById('statsPill');
-    pill.textContent = `Aujourd'hui — DeepL: ${calls} req / ${chars.toLocaleString()} car. · Cache: ${hits} hit / ${miss} miss`;
+    // ✅ sûr (quotes + concaténation)
+pill.textContent =
+  "Aujourd'hui — DeepL: " + calls +
+  " req / " + chars.toLocaleString() +
+  " car. · Cache: " + hits +
+  " hit / " + miss + " miss";
   }catch(e){
     console.error(e);
     const pill = document.getElementById('statsPill');
