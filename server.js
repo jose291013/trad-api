@@ -324,14 +324,26 @@ async function setMode(v) {
 }
 
 /* ========== Usage metrics (réutilise public.usage_stats) ========== */
-async function logUsage({ provider='none', fromCache=false, chars=0, projectId=process.env.PROJECT_ID, sourceLang=null, targetLang=null }) {
-  const day = new Date().toISOString().slice(0,10);
-  await pool.query(
-    `INSERT INTO public.usage_stats(day, project_id, source_lang, target_lang, from_cache, provider, chars_count, created_at)
-     VALUES ($1, $2, $3, $4, $5, $6, $7, now())`,
-    [day, projectId || 'default', sourceLang, targetLang, !!fromCache, provider, Math.max(0, chars|0)]
-  );
+// ---------- Log d'usage (UPSERT) ----------
+async function logUsage({ projectId, sourceLang, targetLang, fromCache, provider, chars }) {
+  // Normalise
+  const day = new Date().toISOString().slice(0,10); // YYYY-MM-DD
+  const _chars = Math.max(0, (chars|0));
+
+  await pool.query(`
+    INSERT INTO public.usage_stats(
+      day, project_id, source_lang, target_lang, from_cache, provider,
+      chars_count, calls_count, created_at, updated_at
+    )
+    VALUES (CURRENT_DATE, $1, $2, $3, $4, $5, $6, 1, now(), now())
+    ON CONFLICT (day, project_id, source_lang, target_lang, from_cache, provider)
+    DO UPDATE SET
+      chars_count = public.usage_stats.chars_count + EXCLUDED.chars_count,
+      calls_count = public.usage_stats.calls_count + 1,
+      updated_at  = now()
+  `, [projectId, sourceLang, targetLang, !!fromCache, provider, _chars]);
 }
+
 
 /* ========== DeepL ========== */
 async function translateWithDeepL({ text, sourceLang, targetLang }) {
@@ -461,29 +473,53 @@ app.post('/translate', async (req, res) => {
 
     const hit = await pool.query(
       `SELECT translated_text FROM translations
-        WHERE project_id=$1 AND source_lang=$2 AND target_lang=$3
-          AND checksum=decode($4,'hex')
-        LIMIT 1`,
+       WHERE project_id=$1 AND source_lang=$2 AND target_lang=$3
+         AND checksum=decode($4,'hex')
+       LIMIT 1`,
       [projectId, sourceLang, targetLang, sumHex]
     );
 
     const cachedText = hit.rows[0]?.translated_text;
     if (cachedText) {
-      await logUsage({ provider: 'cache', fromCache: true, chars: (sourceText || '').length, projectId, sourceLang, targetLang });
+      // ⬇⬇⬇ LOG ICI (cache hit) ⬇⬇⬇
+      try {
+        await logUsage({
+          provider: 'cache', fromCache: true,
+          chars: (sourceText || '').length,
+          projectId, sourceLang, targetLang
+        });
+      } catch (e) { console.warn('usage_stats (cache) error:', e.message); }
+
       return res.json({ from: 'cache', text: cachedText });
     }
 
     // 2) DeepL si autorisé
     const currentMode = await getMode(); // 'cache-only' | 'cache+deepl'
     if (currentMode !== 'cache+deepl') {
-      await logUsage({ provider: 'none', fromCache: false, chars: 0, projectId, sourceLang, targetLang });
+      // ⬇⬇⬇ LOG ICI (miss, deepl off) ⬇⬇⬇
+      try {
+        await logUsage({
+          provider: 'none', fromCache: false,
+          chars: 0, projectId, sourceLang, targetLang
+        });
+      } catch (e) { console.warn('usage_stats (miss) error:', e.message); }
+
       return res.status(404).json({ error: 'miss', note: 'cache-only mode' });
     }
 
+    // Appel DeepL
     const deeplText = await translateWithDeepL({ text: sourceText, sourceLang, targetLang });
-    await logUsage({ provider: 'deepl', fromCache: false, chars: (sourceText || '').length, projectId, sourceLang, targetLang });
 
-    // 3) upsert
+    // ⬇⬇⬇ LOG ICI (deepl appelé) ⬇⬇⬇
+    try {
+      await logUsage({
+        provider: 'deepl', fromCache: false,
+        chars: (sourceText || '').length,
+        projectId, sourceLang, targetLang
+      });
+    } catch (e) { console.warn('usage_stats (deepl) error:', e.message); }
+
+    // 3) upsert (sauvegarde)
     const upsert = await pool.query(
       `INSERT INTO translations(
          project_id, source_lang, target_lang,
@@ -505,9 +541,10 @@ app.post('/translate', async (req, res) => {
     return res.json({ from: 'deepl', text: savedText });
   } catch (e) {
     console.error('translate error:', e);
-    return res.status(500).json({ error: e.message });
+    res.status(500).json({ error: e.message });
   }
 });
+
 
 /* ========== Admin API ========== */
 app.get("/admin/mode", requireAdmin, async (_req, res) => {
