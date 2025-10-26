@@ -6,11 +6,11 @@ services:
     repo: https://github.com/render-oss/docker-pgbouncer
     region: frankfurt
     envVars:
-      # récupère l'Internal URL de TA DB existante par son nom de service Render
+      # URL complète (externe) fournie par Render
       - key: DATABASE_URL
         fromDatabase:
           name: "Traduction Français vers autres langues"
-          property: connectionStringInternal
+          property: connectionString
       - key: POOL_MODE
         value: transaction
       - key: SERVER_RESET_QUERY
@@ -29,12 +29,29 @@ services:
     startCommand: "node server.js"
     autoDeploy: true
     envVars:
-      # Fallback: URL interne directe de TA DB existante
-      - key: DATABASE_URL
+      # Récupère les 'morceaux' de la connexion interne
+      - key: DB_HOST
         fromDatabase:
           name: "Traduction Français vers autres langues"
-          property: connectionStringInternal
+          property: host
+      - key: DB_PORT
+        fromDatabase:
+          name: "Traduction Français vers autres langues"
+          property: port
+      - key: DB_NAME
+        fromDatabase:
+          name: "Traduction Français vers autres langues"
+          property: database
+      - key: DB_USER
+        fromDatabase:
+          name: "Traduction Français vers autres langues"
+          property: user
+      - key: DB_PASSWORD
+        fromDatabase:
+          name: "Traduction Français vers autres langues"
+          property: password
+      # Tu pourras ajouter POOL_DATABASE_URL après déploiement (avec le host interne de PgBouncer)
       - key: PROJECT_ID
-        value: "A REMPLACER PAR TON UUID PROJET"
+        value: "a7b6daa8-7374-43e2-84f2-477fa999697e"
       - key: NODE_ENV
         value: production
