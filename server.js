@@ -33,6 +33,7 @@ app.use((req, res, next) => {
 /* ======================  Auth  ====================== */
 // API publique (hors /admin) via Bearer ${API_TOKEN}
 // API publique (hors /admin) via Bearer ${API_TOKEN}  + whitelist /health, /healthz et /
+// remplace ton middleware API publique par :
 const API_TOKEN = process.env.API_TOKEN;
 app.use((req, res, next) => {
   if (req.path.startsWith("/admin")) return next();
@@ -42,6 +43,11 @@ app.use((req, res, next) => {
   if (header === `Bearer ${API_TOKEN}`) return next();
   return res.status(401).json({ error: "Unauthorized" });
 });
+
+app.get("/health", (_req,res)=>res.send("OK"));
+app.get("/healthz", (_req,res)=>res.send("OK"));
+app.get("/", (_req,res)=>res.send("OK"));
+
 
 
 // Admin via Bearer ${ADMIN_TOKEN} ou ?token=... (pratique en iframe)
