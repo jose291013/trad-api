@@ -397,6 +397,10 @@ app.post("/cache/find", async (req, res) => {
     if (!projectId || !sourceLang || !targetLang || !sourceText) {
       return res.status(400).json({ error: "Missing fields" });
     }
+    if ((sourceLang||'').toUpperCase() === (targetLang||'').toUpperCase()) {
+  return res.json({ from: 'bypass', text: sourceText });
+}
+
     const sourceNorm = normalizeSource(sourceText);
     const sumHex = makeChecksum({ sourceNorm, targetLang, selectorHash });
     const { rows } = await pool.query(
