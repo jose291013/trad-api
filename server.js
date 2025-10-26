@@ -29,13 +29,18 @@ app.use(cors({
 
 
 // --- Auth simple par jeton ---
-const API_TOKEN = process.env.API_TOKEN; // à définir dans Render
+// --- Auth simple par jeton (API publique) ---
+const API_TOKEN = process.env.API_TOKEN;
 app.use((req, res, next) => {
-  if (!API_TOKEN) return next();               // si pas défini, on laisse passer (utile en dev)
-  const auth = req.get("Authorization") || ""; // ex: "Bearer abc123"
-  if (auth === `Bearer ${API_TOKEN}`) return next();
+  // ➜ Laisse passer tout ce qui commence par /admin :
+  if (req.path.startsWith("/admin")) return next();
+
+  if (!API_TOKEN) return next();
+  const header = req.get("Authorization") || ""; // ex: "Bearer abc123"
+  if (header === `Bearer ${API_TOKEN}`) return next();
   return res.status(401).json({ error: "Unauthorized" });
 });
+
 // --- Admin auth (jeton distinct de l'API publique) ---
 const ADMIN_TOKEN = process.env.ADMIN_TOKEN;
 
