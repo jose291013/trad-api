@@ -125,6 +125,11 @@ app.get("/admin", requireAdmin, (_req, res) => {
     <span id="pageInfo" class="muted"></span>
     <button id="next">▶</button>
   </div>
+  <div class="row">
+  <button id="refreshStats">Stats (mois courant)</button>
+  <span id="statsInfo" class="muted"></span>
+</div>
+
   </section>
 
   <table id="grid"><thead>
@@ -268,6 +273,26 @@ app.get("/admin", requireAdmin, (_req, res) => {
 
     loadMode();
     fetchList();
+    async function loadStatsMonthly(){
+  const d = new Date();
+  const y = d.getFullYear(), m = d.getMonth()+1;
+  const from = `${y}-${String(m).padStart(2,'0')}-01`;
+  // to = dernier jour du mois courant
+  const to = new Date(y, m, 0).toISOString().slice(0,10);
+  const r = await fetch(`/admin/stats?from=${from}&to=${to}`, {
+    headers: { 'Authorization': 'Bearer ' + token }
+  });
+  if(!r.ok){ document.getElementById('statsInfo').textContent = 'Stats: erreur'; return; }
+  const data = await r.json();
+  const deepl = data.totals?.chars_deepl || 0;
+  const cost  = data.totals?.estimated_cost_eur ?? 0;
+  document.getElementById('statsInfo').textContent =
+    `Chars DeepL (mois): ${deepl.toLocaleString()} — coût estimé: ${cost.toFixed(2)} €`;
+}
+document.getElementById('refreshStats').onclick = loadStatsMonthly;
+// charger au boot (optionnel)
+loadStatsMonthly();
+
   </script>
 </body></html>`);
 });
@@ -321,6 +346,25 @@ async function setMode(v) {
     [v]
   );
 }
+function countChars(s=""){ return [...(s||"")].length; } // gère UTF-16 correctement
+
+async function bumpUsage({
+  day = new Date().toISOString().slice(0,10),
+  projectId,
+  sourceLang,
+  targetLang,
+  fromCache,             // true/false
+  provider = fromCache ? 'none' : 'deepl',
+  chars = 0
+}){
+  await pool.query(`
+    INSERT INTO public.usage_stats(day, project_id, source_lang, target_lang, from_cache, provider, chars_count)
+    VALUES ($1,$2,$3,$4,$5,$6,$7)
+    ON CONFLICT (day, project_id, source_lang, target_lang, from_cache, provider)
+    DO UPDATE SET chars_count = public.usage_stats.chars_count + EXCLUDED.chars_count
+  `, [day, projectId, sourceLang, targetLang, !!fromCache, provider, Math.max(0, chars|0)]);
+}
+
 
 /* ======================  DeepL  ====================== */
 async function translateWithDeepL({ text, sourceLang, targetLang }) {
@@ -460,17 +504,41 @@ app.post('/translate', async (req, res) => {
         LIMIT 1`,
       [projectId, sourceLang, targetLang, sumHex]
     );
-    if (hit.rows[0]?.translated_text) {
-      return res.json({ from: 'cache', text: hit.rows[0].translated_text });
-    }
+    // -- après le SELECT hit cache :
+if (hit.rows[0]?.translated_text) {
+  // compteur: cache hit
+  await bumpUsage({
+    projectId, sourceLang, targetLang,
+    fromCache: true,
+    provider: 'none',
+    chars: countChars(sourceText) // on compte la demande initiale
+  });
+  return res.json({ from: 'cache', text: hit.rows[0].translated_text });
+}
 
-    // 2) DeepL si autorisé
-    const mode = await getMode(); // 'cache-only' | 'cache+deepl'
-    if (mode !== 'cache+deepl') {
-      return res.status(404).json({ error: 'miss', note: 'cache-only mode' });
-    }
+// -- avant/après l'appel DeepL :
+const mode = await getMode();
+if (mode !== 'cache+deepl') {
+  // compteur: miss (cache-only)
+  await bumpUsage({
+    projectId, sourceLang, targetLang,
+    fromCache: false,
+    provider: 'none',
+    chars: countChars(sourceText)
+  });
+  return res.status(404).json({ error: 'miss', note: 'cache-only mode' });
+}
 
-    const translatedText = await translateWithDeepL({ text: sourceText, sourceLang, targetLang });
+const translatedText = await translateWithDeepL({ text: sourceText, sourceLang, targetLang });
+
+// compteur: provider DeepL
+await bumpUsage({
+  projectId, sourceLang, targetLang,
+  fromCache: false,
+  provider: 'deepl',
+  chars: countChars(sourceText) // on facture côté provider sur l'entrée
+});
+
 
     // 3) upsert (sauvegarde)
     const { rows } = await pool.query(
@@ -624,6 +692,58 @@ app.get("/__routes", (_req,res)=> res.json(__collectRoutes(app).sort((a,b)=>a.pa
 
 // Log dans les logs Render au démarrage
 console.log("Routes:", __collectRoutes(app).map(r=>`${r.methods} ${r.path}`).sort().join(" | "));
+
+// GET /admin/stats?from=2025-10-01&to=2025-10-31&projectId=... (tous par défaut)
+// Ajoute coût estimé via env: DEEPL_COST_PER_MILLION_EUR (ex: "20.0")
+app.get("/admin/stats", requireAdmin, async (req, res) => {
+  try {
+    const from = (req.query.from || "").toString().trim();
+    const to   = (req.query.to   || "").toString().trim();
+    const projectId = (req.query.projectId || "").toString().trim();
+
+    const where = ["1=1"];
+    const params = [];
+    let i = 1;
+
+    if (from) { where.push(`day >= $${i++}`); params.push(from); }
+    if (to)   { where.push(`day <= $${i++}`); params.push(to); }
+    if (projectId) { where.push(`project_id = $${i++}`); params.push(projectId); }
+
+    const sql = `
+      SELECT
+        day, project_id, source_lang, target_lang, from_cache, provider,
+        SUM(chars_count)::int AS chars
+      FROM public.usage_stats
+      WHERE ${where.join(" AND ")}
+      GROUP BY day, project_id, source_lang, target_lang, from_cache, provider
+      ORDER BY day DESC, project_id, source_lang, target_lang
+    `;
+    const { rows } = await pool.query(sql, params);
+
+    // Totaux utiles
+    const totalCharsDeepl = rows
+      .filter(r => r.provider === 'deepl')
+      .reduce((a,b)=>a + (b.chars|0), 0);
+
+    const pricePerMillion = Number(process.env.DEEPL_COST_PER_MILLION_EUR || "0"); // ex: 20
+    const estimatedCostEUR = pricePerMillion > 0
+      ? (totalCharsDeepl / 1_000_000) * pricePerMillion
+      : 0;
+
+    res.json({
+      rows,
+      totals: {
+        chars_deepl: totalCharsDeepl,
+        price_per_million_eur: pricePerMillion,
+        estimated_cost_eur: Number(estimatedCostEUR.toFixed(2))
+      }
+    });
+  } catch (e) {
+    console.error(e);
+    res.status(500).json({ error: e.message });
+  }
+});
+
 
 
 /* ======================  Boot  ====================== */
