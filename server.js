@@ -438,30 +438,63 @@ app.get("/admin/api/translations", requireAdmin, async (req, res) => {
 });
 
 // --- Édition (log + lock) ---
+// --- Édition (log + lock) — version robuste avec transaction ---
 app.post("/admin/api/edit", requireAdmin, async (req, res) => {
+  const client = await pool.connect();
   try {
     const { id, newText, reviewerEmail = "unknown", reason = null } = req.body || {};
     if (!id || !newText) return res.status(400).json({ error: "Missing id/newText" });
 
-    await pool.query(`SELECT set_config('app.user',$1,true)`, [reviewerEmail]);
-    const { rows } = await pool.query(`
-      UPDATE translations
-         SET translated_text=$1, status='approved', is_locked=true, updated_at=now()
-       WHERE id=$2
-    RETURNING *;`, [newText, id]);
+    await client.query("BEGIN");
 
-    if (rows[0] && reason) {
-      await pool.query(`
-        UPDATE translation_revisions
-           SET change_reason=$1
-         WHERE translation_id=$2
-           AND change_reason IS NULL;`, [reason, rows[0].id]);
+    // Permet au trigger d'avoir l'info du relecteur
+    await client.query(`SELECT set_config('app.user',$1,true)`, [reviewerEmail]);
+
+    // 1) Met à jour la traduction (lock + approved)
+    const { rows } = await client.query(
+      `
+      UPDATE translations
+         SET translated_text = $1,
+             status = 'approved',
+             is_locked = true,
+             updated_at = now()
+       WHERE id = $2
+      RETURNING id;
+      `,
+      [newText, id]
+    );
+
+    const t = rows[0];
+
+    // 2) Si un motif est fourni, on essaie de le poser sur la DERNIÈRE révision créée
+    if (t && reason) {
+      await client.query(
+        `
+        UPDATE translation_revisions tr
+           SET change_reason = $1
+          FROM (
+            SELECT id
+              FROM translation_revisions
+             WHERE translation_id = $2
+             ORDER BY changed_at DESC
+             LIMIT 1
+          ) last
+         WHERE tr.id = last.id;
+        `,
+        [reason, t.id]
+      );
     }
-    res.json({ updated: rows[0] || null });
+
+    await client.query("COMMIT");
+    res.json({ updated: t || null });
   } catch (e) {
-    console.error(e);
+    try { await client.query("ROLLBACK"); } catch {}
+    console.error("admin/edit error:", e);
     res.status(500).json({ error: e.message });
+  } finally {
+    client.release();
   }
 });
+
 
 app.listen(PORT, () => console.log(`✅ API up on :${PORT}`));
