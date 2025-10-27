@@ -3,7 +3,6 @@ import express from "express";
 import { Pool } from "pg";
 import crypto from "node:crypto";
 import cors from "cors";
-import { franc } from "franc-min";
 
 const app = express();
 app.use(express.json());
@@ -20,11 +19,24 @@ function canonicalizePath(raw) {
   }
 }
 
-// ---- Language detection (ISO3 -> ISO2 mapping for franc)
+// ---- Language detection (lazy, optional) ----
+let __franc = null;
+async function loadFranc(){
+  if (__franc !== null) return __franc;
+  try {
+    const mod = await import('franc-min');
+    __franc = (mod && (mod.franc || mod.default)) || null;
+  } catch {
+    __franc = null; // package not installed -> detection disabled
+  }
+  return __franc;
+}
 const ISO3_TO_ISO2 = { fra:'fr', nld:'nl', eng:'en', spa:'es', deu:'de', ita:'it', por:'pt' };
-function detectLang2(text){
+async function detectLang2(text){
   const t = (text || '').toString().trim();
-  if (t.length < 8) return null; // too short to be reliable
+  if (t.length < 8) return null;
+  const franc = await loadFranc();
+  if (!franc) return null;
   const code3 = franc(t, { minLength: 8 });
   return ISO3_TO_ISO2[code3] || null;
 }
@@ -514,7 +526,7 @@ app.post('/translate', async (req, res) => {
       contextUrl = null, pagePath = null, selectorHash = null
     } = req.body || {};
 
-    const detected = detectLang2(sourceText);
+    const detected = await detectLang2(sourceText);
     const effectiveSourceLang = detected || sourceLang;
     const pageCanonical = canonicalizePath(pagePath);
 
