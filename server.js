@@ -770,6 +770,21 @@ app.get("/__version", (_req,res)=> res.json({
 }));
 console.log("Routes:", __collectRoutes(app).map(r=>`${r.methods} ${r.path}`).sort().join(" | "));
 
+// === Front-cache invalidation (nonce) ===
+let CACHE_NONCE = 1;
+
+// Voir la valeur courante (BO)
+app.get("/admin/api/cache-nonce", requireAdmin, (_req, res) => {
+  res.json({ nonce: CACHE_NONCE });
+});
+
+// Incrémente le nonce => invalide les caches front
+app.post("/admin/api/flush-cache", requireAdmin, (_req, res) => {
+  CACHE_NONCE++;
+  res.json({ ok: true, nonce: CACHE_NONCE });
+});
+
+
 /* ========== Boot ========== */
 const PORT = Number(process.env.PORT) || 10000;
 app.listen(PORT, () => console.log(`✅ API up on :${PORT}`));
