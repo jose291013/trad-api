@@ -19,7 +19,7 @@ function canonicalizePath(raw) {
   }
 }
 
-// ---- Language detection (lazy, optional)
+// ---- Language detection (lazy, optional) using franc-min if installed
 let __franc = null;
 async function loadFranc(){
   if (__franc !== null) return __franc;
@@ -27,27 +27,25 @@ async function loadFranc(){
     const mod = await import('franc-min');
     __franc = (mod && (mod.franc || mod.default)) || null;
   } catch {
-    __franc = null;
+    __franc = null; // package not installed -> detection disabled
   }
   return __franc;
 }
 const ISO3_TO_ISO2 = { fra:'fr', nld:'nl', eng:'en', spa:'es', deu:'de', ita:'it', por:'pt' };
 async function detectLang2(text){
   const t=(text||'').toString().trim();
-  if (t.length<8) return null;
+  if (t.length < 8) return null;
   const franc = await loadFranc();
   if (!franc) return null;
   const code3 = franc(t, { minLength: 8 });
   return ISO3_TO_ISO2[code3] || null;
 }
 
-// ---- Target language allow-list + DeepL mapping
+// ---- Target language allow-list + DeepL mapping (ES enabled)
 const ALLOWED_TARGETS = new Set(['nl','en','es','de','it','pt','fr']);
 function deeplTargetCode(lang2){
-  const up=(lang2||'').toLowerCase();
-  const map={
-    en:'EN-GB', fr:'FR', nl:'NL', es:'ES', de:'DE', it:'IT', pt:'PT-PT'
-  };
+  const up = (lang2||'').toLowerCase();
+  const map = { en:'EN-GB', fr:'FR', nl:'NL', es:'ES', de:'DE', it:'IT', pt:'PT-PT' };
   return map[up] || up.toUpperCase();
 }
 
@@ -499,9 +497,9 @@ app.post("/cache/upsert", async (req, res) => {
   `INSERT INTO translations(
      project_id, source_lang, target_lang,
      source_text, source_norm, translated_text,
-     context_url, page_path, page_canonical, selector_hash,
+     context_url, page_path, selector_hash,
      checksum, status
-   ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10, decode($11,'hex'), 'auto')
+   ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9, decode($10,'hex'), 'auto')
    ON CONFLICT (project_id, source_lang, target_lang, source_norm)
    DO UPDATE SET
      translated_text = CASE
@@ -509,14 +507,13 @@ app.post("/cache/upsert", async (req, res) => {
        ELSE translations.translated_text
      END,
      context_url   = COALESCE(EXCLUDED.context_url, translations.context_url),
-     page_path       = COALESCE(EXCLUDED.page_path, translations.page_path),
-     page_canonical = COALESCE(EXCLUDED.page_canonical, translations.page_canonical),
+     page_path     = COALESCE(EXCLUDED.page_path, translations.page_path),
      selector_hash = COALESCE(EXCLUDED.selector_hash, translations.selector_hash),
      checksum      = EXCLUDED.checksum,     -- on garde le dernier checksum calculé
      updated_at    = now()
    RETURNING *;`,
   [projectId, sourceLang, targetLang, sourceText, sourceNorm, translatedText,
-   contextUrl, pagePath, pageCanonical, selectorHash, sumHex]
+   contextUrl, pagePath, selectorHash, sumHex]
 );
 
     res.json({ saved: rows[0] });
@@ -535,15 +532,14 @@ app.post('/translate', async (req, res) => {
       sourceLang, targetLang, sourceText,
       contextUrl = null, pagePath = null, selectorHash = null
     } = req.body || {};
-
-    // add detection + canonical + target validation
+    // Detection + canonical + target whitelist
     const detected = await detectLang2(sourceText);
     const effectiveSourceLang = detected || sourceLang;
     if (!ALLOWED_TARGETS.has((targetLang||'').toLowerCase())) {
       return res.status(400).json({ error: 'Unsupported targetLang' });
     }
     const pageCanonical = canonicalizePath(pagePath);
-
+    
 
     if (!projectId || !sourceLang || !targetLang || !sourceText) {
       return res.status(400).json({ error: 'Missing fields' });
@@ -631,7 +627,7 @@ app.post('/translate', async (req, res) => {
   `INSERT INTO translations(
      project_id, source_lang, target_lang,
      source_text, source_norm, translated_text,
-     context_url, page_path, page_canonical, selector_hash, checksum, status
+     context_url, page_path, selector_hash, checksum, status
    ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,decode($10,'hex'),'auto')
    ON CONFLICT (project_id, source_lang, target_lang, source_norm)
    DO UPDATE SET
