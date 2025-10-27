@@ -478,7 +478,8 @@ app.post("/cache/upsert", async (req, res) => {
   }
 });
 
-/* ========== Orchestrateur: /translate ========== */
+
+// ========== Orchestrateur: /translate ==========
 app.post('/translate', async (req, res) => {
   try {
     const {
@@ -490,14 +491,23 @@ app.post('/translate', async (req, res) => {
     if (!projectId || !sourceLang || !targetLang || !sourceText) {
       return res.status(400).json({ error: 'Missing fields' });
     }
+
+    // 0) Ne pas “traduire” FR->FR (ou NL->NL), et bypass chiffres/prix
+    if ((sourceLang||'').toUpperCase() === (targetLang||'').toUpperCase()) {
+      return res.json({ from: 'bypass', text: sourceText });
+    }
     const NUMERIC_RX = /^\s*[\d\s\u00A0.,:+\-/%()]*\s*(?:€|EUR|£|GBP|\$|USD|CHF|¥|JPY|₽|PLN|CZK|HUF|SEK|NOK|DKK)?\s*$/i;
     if (NUMERIC_RX.test(sourceText || '')) {
       return res.json({ from: 'bypass', text: sourceText });
     }
 
-    // 1) cache
+    // 1) Cache: d’abord par checksum (inclut selectorHash)…
     const sourceNorm = normalizeSource(sourceText);
-    const sumHex = makeChecksum({ sourceNorm, targetLang, selectorHash: selectorHash || '' });
+    const sumHex = makeChecksum({
+      sourceNorm,
+      targetLang,
+      selectorHash: selectorHash || ''
+    });
 
     const hit = await pool.query(
       `SELECT translated_text FROM translations
@@ -507,9 +517,23 @@ app.post('/translate', async (req, res) => {
       [projectId, sourceLang, targetLang, sumHex]
     );
 
-    const cachedText = hit.rows[0]?.translated_text;
+    let cachedText = hit.rows[0]?.translated_text || null;
+
+    // …puis Fallback: même source_norm sans tenir compte du selectorHash
+    if (!cachedText) {
+      const alt = await pool.query(
+        `SELECT translated_text FROM translations
+         WHERE project_id=$1 AND source_lang=$2 AND target_lang=$3
+           AND source_norm=$4
+         ORDER BY updated_at DESC
+         LIMIT 1`,
+        [projectId, sourceLang, targetLang, sourceNorm]
+      );
+      cachedText = alt.rows[0]?.translated_text || null;
+    }
+
     if (cachedText) {
-      // ⬇⬇⬇ LOG ICI (cache hit) ⬇⬇⬇
+      // log “cache hit” (protégé pour éviter de casser la trad)
       try {
         await logUsage({
           provider: 'cache', fromCache: true,
@@ -521,10 +545,9 @@ app.post('/translate', async (req, res) => {
       return res.json({ from: 'cache', text: cachedText });
     }
 
-    // 2) DeepL si autorisé
+    // 2) DeepL uniquement si autorisé
     const currentMode = await getMode(); // 'cache-only' | 'cache+deepl'
     if (currentMode !== 'cache+deepl') {
-      // ⬇⬇⬇ LOG ICI (miss, deepl off) ⬇⬇⬇
       try {
         await logUsage({
           provider: 'none', fromCache: false,
@@ -535,10 +558,9 @@ app.post('/translate', async (req, res) => {
       return res.status(404).json({ error: 'miss', note: 'cache-only mode' });
     }
 
-    // Appel DeepL
+    // 3) Appel DeepL
     const deeplText = await translateWithDeepL({ text: sourceText, sourceLang, targetLang });
 
-    // ⬇⬇⬇ LOG ICI (deepl appelé) ⬇⬇⬇
     try {
       await logUsage({
         provider: 'deepl', fromCache: false,
@@ -547,7 +569,7 @@ app.post('/translate', async (req, res) => {
       });
     } catch (e) { console.warn('usage_stats (deepl) error:', e.message); }
 
-    // 3) upsert (sauvegarde)
+    // 4) Sauvegarde
     const upsert = await pool.query(
       `INSERT INTO translations(
          project_id, source_lang, target_lang,
@@ -567,11 +589,13 @@ app.post('/translate', async (req, res) => {
 
     const savedText = upsert.rows[0]?.translated_text || deeplText;
     return res.json({ from: 'deepl', text: savedText });
+
   } catch (e) {
     console.error('translate error:', e);
     res.status(500).json({ error: e.message });
   }
 });
+
 
 
 /* ========== Admin API ========== */
