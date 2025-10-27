@@ -451,26 +451,28 @@ app.post("/cache/upsert", async (req, res) => {
     const sourceNorm = normalizeSource(sourceText);
     const sumHex = makeChecksum({ sourceNorm, targetLang, selectorHash: selectorHash || "" });
     const { rows } = await pool.query(
-      `INSERT INTO translations(
-         project_id, source_lang, target_lang,
-         source_text, source_norm, translated_text,
-         context_url, page_path, selector_hash,
-         checksum, status
-       ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9, decode($10,'hex'), 'auto')
-       ON CONFLICT (project_id, source_lang, target_lang, checksum)
-       DO UPDATE SET
-         translated_text = CASE
-           WHEN NOT translations.is_locked THEN EXCLUDED.translated_text
-           ELSE translations.translated_text
-         END,
-         context_url   = COALESCE(EXCLUDED.context_url, translations.context_url),
-         page_path     = COALESCE(EXCLUDED.page_path, translations.page_path),
-         selector_hash = COALESCE(EXCLUDED.selector_hash, translations.selector_hash),
-         updated_at = now()
-       RETURNING *;`,
-      [projectId, sourceLang, targetLang, sourceText, sourceNorm, translatedText,
-       contextUrl, pagePath, selectorHash, sumHex]
-    );
+  `INSERT INTO translations(
+     project_id, source_lang, target_lang,
+     source_text, source_norm, translated_text,
+     context_url, page_path, selector_hash,
+     checksum, status
+   ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9, decode($10,'hex'), 'auto')
+   ON CONFLICT (project_id, source_lang, target_lang, source_norm)
+   DO UPDATE SET
+     translated_text = CASE
+       WHEN NOT translations.is_locked THEN EXCLUDED.translated_text
+       ELSE translations.translated_text
+     END,
+     context_url   = COALESCE(EXCLUDED.context_url, translations.context_url),
+     page_path     = COALESCE(EXCLUDED.page_path, translations.page_path),
+     selector_hash = COALESCE(EXCLUDED.selector_hash, translations.selector_hash),
+     checksum      = EXCLUDED.checksum,     -- on garde le dernier checksum calculé
+     updated_at    = now()
+   RETURNING *;`,
+  [projectId, sourceLang, targetLang, sourceText, sourceNorm, translatedText,
+   contextUrl, pagePath, selectorHash, sumHex]
+);
+
     res.json({ saved: rows[0] });
   } catch (e) {
     console.error(e);
@@ -571,21 +573,24 @@ app.post('/translate', async (req, res) => {
 
     // 4) Sauvegarde
     const upsert = await pool.query(
-      `INSERT INTO translations(
-         project_id, source_lang, target_lang,
-         source_text, source_norm, translated_text,
-         context_url, page_path, selector_hash, checksum, status
-       ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,decode($10,'hex'),'auto')
-       ON CONFLICT (project_id,source_lang,target_lang,checksum) DO UPDATE
-         SET translated_text = COALESCE(EXCLUDED.translated_text, translations.translated_text),
-             context_url     = COALESCE(EXCLUDED.context_url,     translations.context_url),
-             page_path       = COALESCE(EXCLUDED.page_path,       translations.page_path),
-             selector_hash   = COALESCE(EXCLUDED.selector_hash,   translations.selector_hash),
-             updated_at = now()
-       RETURNING translated_text`,
-      [projectId, sourceLang, targetLang, sourceText, sourceNorm, deeplText,
-       contextUrl, pagePath, selectorHash, sumHex]
-    );
+  `INSERT INTO translations(
+     project_id, source_lang, target_lang,
+     source_text, source_norm, translated_text,
+     context_url, page_path, selector_hash, checksum, status
+   ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,decode($10,'hex'),'auto')
+   ON CONFLICT (project_id, source_lang, target_lang, source_norm)
+   DO UPDATE SET
+     translated_text = COALESCE(EXCLUDED.translated_text, translations.translated_text),
+     context_url     = COALESCE(EXCLUDED.context_url,     translations.context_url),
+     page_path       = COALESCE(EXCLUDED.page_path,       translations.page_path),
+     selector_hash   = COALESCE(EXCLUDED.selector_hash,   translations.selector_hash),
+     checksum        = EXCLUDED.checksum,
+     updated_at      = now()
+   RETURNING translated_text`,
+  [projectId, sourceLang, targetLang, sourceText, sourceNorm, deeplText,
+   contextUrl, pagePath, selectorHash, sumHex]
+);
+
 
     const savedText = upsert.rows[0]?.translated_text || deeplText;
     return res.json({ from: 'deepl', text: savedText });
