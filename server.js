@@ -19,7 +19,7 @@ function canonicalizePath(raw) {
   }
 }
 
-// ---- Language detection (lazy, optional) ----
+// ---- Language detection (lazy, optional)
 let __franc = null;
 async function loadFranc(){
   if (__franc !== null) return __franc;
@@ -27,18 +27,28 @@ async function loadFranc(){
     const mod = await import('franc-min');
     __franc = (mod && (mod.franc || mod.default)) || null;
   } catch {
-    __franc = null; // package not installed -> detection disabled
+    __franc = null;
   }
   return __franc;
 }
 const ISO3_TO_ISO2 = { fra:'fr', nld:'nl', eng:'en', spa:'es', deu:'de', ita:'it', por:'pt' };
 async function detectLang2(text){
-  const t = (text || '').toString().trim();
-  if (t.length < 8) return null;
+  const t=(text||'').toString().trim();
+  if (t.length<8) return null;
   const franc = await loadFranc();
   if (!franc) return null;
   const code3 = franc(t, { minLength: 8 });
   return ISO3_TO_ISO2[code3] || null;
+}
+
+// ---- Target language allow-list + DeepL mapping
+const ALLOWED_TARGETS = new Set(['nl','en','es','de','it','pt','fr']);
+function deeplTargetCode(lang2){
+  const up=(lang2||'').toLowerCase();
+  const map={
+    en:'EN-GB', fr:'FR', nl:'NL', es:'ES', de:'DE', it:'IT', pt:'PT-PT'
+  };
+  return map[up] || up.toUpperCase();
 }
 
 
@@ -526,8 +536,12 @@ app.post('/translate', async (req, res) => {
       contextUrl = null, pagePath = null, selectorHash = null
     } = req.body || {};
 
+    // add detection + canonical + target validation
     const detected = await detectLang2(sourceText);
     const effectiveSourceLang = detected || sourceLang;
+    if (!ALLOWED_TARGETS.has((targetLang||'').toLowerCase())) {
+      return res.status(400).json({ error: 'Unsupported targetLang' });
+    }
     const pageCanonical = canonicalizePath(pagePath);
 
 
@@ -763,5 +777,6 @@ console.log("Routes:", __collectRoutes(app).map(r=>`${r.methods} ${r.path}`).sor
 /* ========== Boot ========== */
 const PORT = Number(process.env.PORT) || 10000;
 app.listen(PORT, () => console.log(`✅ API up on :${PORT}`));
+
 
 
