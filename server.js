@@ -1,22 +1,34 @@
-// ---- Canonicalization helper: /complete/2574 -> /complete ----
+// server.js
+import express from "express";
+import { Pool } from "pg";
+import crypto from "node:crypto";
+import cors from "cors";
+import { franc } from "franc-min";
+
+const app = express();
+app.use(express.json());
+
+
+// ---- Canonicalization helper: /complete/2574 -> /complete
 function canonicalizePath(raw) {
   if (!raw) return raw;
   try {
-    const u = new URL(raw, 'https://dummy.local/'); // handle absolute URLs
+    const u = new URL(raw, 'https://dummy.local/');
     return u.pathname.replace(/\/(?:\d+|[0-9a-f]{6,}|[0-9a-f-]{8,})\/?$/i, '');
   } catch {
     return String(raw).replace(/\/(?:\d+|[0-9a-f]{6,}|[0-9a-f-]{8,})\/?$/i, '');
   }
 }
 
-// server.js
-import express from "express";
-import { Pool } from "pg";
-import crypto from "node:crypto";
-import cors from "cors";
+// ---- Language detection (ISO3 -> ISO2 mapping for franc)
+const ISO3_TO_ISO2 = { fra:'fr', nld:'nl', eng:'en', spa:'es', deu:'de', ita:'it', por:'pt' };
+function detectLang2(text){
+  const t = (text || '').toString().trim();
+  if (t.length < 8) return null; // too short to be reliable
+  const code3 = franc(t, { minLength: 8 });
+  return ISO3_TO_ISO2[code3] || null;
+}
 
-const app = express();
-app.use(express.json());
 
 /* ========== CORS ========== */
 const allowList = (process.env.ALLOWED_ORIGINS || "")
@@ -408,7 +420,7 @@ app.post("/cache/find", async (req, res) => {
     if (!projectId || !sourceLang || !targetLang || !sourceText) {
       return res.status(400).json({ error: "Missing fields" });
     }
-    if ((sourceLang||'').toUpperCase() === (targetLang||'').toUpperCase()) {
+    if ((effectiveSourceLang||'').toUpperCase() === (targetLang||'').toUpperCase()) {
   return res.json({ from: 'bypass', text: sourceText });
 }
 
@@ -461,12 +473,13 @@ app.post("/cache/upsert", async (req, res) => {
     }
     const sourceNorm = normalizeSource(sourceText);
     const sumHex = makeChecksum({ sourceNorm, targetLang, selectorHash: selectorHash || "" });
-    const { rows } = await pool.query(`INSERT INTO translations(
+    const { rows } = await pool.query(
+  `INSERT INTO translations(
      project_id, source_lang, target_lang,
      source_text, source_norm, translated_text,
      context_url, page_path, page_canonical, selector_hash,
      checksum, status
-   ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9, decode($10,'hex'), 'auto')
+   ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10, decode($11,'hex'), 'auto')
    ON CONFLICT (project_id, source_lang, target_lang, source_norm)
    DO UPDATE SET
      translated_text = CASE
@@ -474,13 +487,14 @@ app.post("/cache/upsert", async (req, res) => {
        ELSE translations.translated_text
      END,
      context_url   = COALESCE(EXCLUDED.context_url, translations.context_url),
-     page_path     = COALESCE(EXCLUDED.page_path, translations.page_path),
+     page_path       = COALESCE(EXCLUDED.page_path, translations.page_path),
+     page_canonical = COALESCE(EXCLUDED.page_canonical, translations.page_canonical),
      selector_hash = COALESCE(EXCLUDED.selector_hash, translations.selector_hash),
      checksum      = EXCLUDED.checksum,     -- on garde le dernier checksum calculé
      updated_at    = now()
    RETURNING *;`,
   [projectId, sourceLang, targetLang, sourceText, sourceNorm, translatedText,
-   contextUrl, pagePath, selectorHash, sumHex]
+   contextUrl, pagePath, pageCanonical, selectorHash, sumHex]
 );
 
     res.json({ saved: rows[0] });
@@ -500,12 +514,17 @@ app.post('/translate', async (req, res) => {
       contextUrl = null, pagePath = null, selectorHash = null
     } = req.body || {};
 
+    const detected = detectLang2(sourceText);
+    const effectiveSourceLang = detected || sourceLang;
+    const pageCanonical = canonicalizePath(pagePath);
+
+
     if (!projectId || !sourceLang || !targetLang || !sourceText) {
       return res.status(400).json({ error: 'Missing fields' });
     }
 
     // 0) Ne pas “traduire” FR->FR (ou NL->NL), et bypass chiffres/prix
-    if ((sourceLang||'').toUpperCase() === (targetLang||'').toUpperCase()) {
+    if ((effectiveSourceLang||'').toUpperCase() === (targetLang||'').toUpperCase()) {
       return res.json({ from: 'bypass', text: sourceText });
     }
     const NUMERIC_RX = /^\s*[\d\s\u00A0.,:+\-/%()]*\s*(?:€|EUR|£|GBP|\$|USD|CHF|¥|JPY|₽|PLN|CZK|HUF|SEK|NOK|DKK)?\s*$/i;
@@ -582,7 +601,8 @@ app.post('/translate', async (req, res) => {
     } catch (e) { console.warn('usage_stats (deepl) error:', e.message); }
 
     // 4) Sauvegarde
-    const upsert = await pool.query(`INSERT INTO translations(
+    const upsert = await pool.query(
+  `INSERT INTO translations(
      project_id, source_lang, target_lang,
      source_text, source_norm, translated_text,
      context_url, page_path, page_canonical, selector_hash, checksum, status
@@ -658,14 +678,13 @@ app.get("/admin/api/translations", requireAdmin, async (req, res) => {
     const from      = (req.query.from ?? "").toString().trim();
     const to        = (req.query.to ?? "").toString().trim();
     const page_path = (req.query.page_path ?? "").toString().trim();
-  const page_canonical = canonicalizePath(page_path);
 
     const where = ["1=1"]; const params = []; let i = 1;
     if (q)        { where.push(`(source_text ILIKE $${i} OR translated_text ILIKE $${i})`); params.push(`%${q}%`); i++; }
     if (status)   { where.push(`status = $${i}`); params.push(status); i++; }
     if (from)     { where.push(`source_lang = $${i}`); params.push(from); i++; }
     if (to)       { where.push(`target_lang = $${i}`); params.push(to); i++; }
-    if (page_path, page_canonical){ where.push(`page_path, page_canonical ILIKE $${i}`); params.push(`%${page_path, page_canonical}%`); i++; }
+    if (page_path){ where.push(`page_path ILIKE $${i}`); params.push(`%${page_path}%`); i++; }
 
     const whereSQL = where.join(" AND ");
     const { rows: totalRows } = await pool.query(
@@ -674,7 +693,7 @@ app.get("/admin/api/translations", requireAdmin, async (req, res) => {
     const total = totalRows[0]?.total ?? 0;
 
     const { rows: items } = await pool.query(
-      `SELECT id, source_lang, target_lang, source_text, translated_text, status, page_path, page_canonical, updated_at
+      `SELECT id, source_lang, target_lang, source_text, translated_text, status, page_path, updated_at
          FROM translations
         WHERE ${whereSQL}
         ORDER BY updated_at DESC
