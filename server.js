@@ -1,3 +1,14 @@
+// ---- Canonicalization helper: /complete/2574 -> /complete ----
+function canonicalizePath(raw) {
+  if (!raw) return raw;
+  try {
+    const u = new URL(raw, 'https://dummy.local/'); // handle absolute URLs
+    return u.pathname.replace(/\/(?:\d+|[0-9a-f]{6,}|[0-9a-f-]{8,})\/?$/i, '');
+  } catch {
+    return String(raw).replace(/\/(?:\d+|[0-9a-f]{6,}|[0-9a-f-]{8,})\/?$/i, '');
+  }
+}
+
 // server.js
 import express from "express";
 import { Pool } from "pg";
@@ -450,11 +461,10 @@ app.post("/cache/upsert", async (req, res) => {
     }
     const sourceNorm = normalizeSource(sourceText);
     const sumHex = makeChecksum({ sourceNorm, targetLang, selectorHash: selectorHash || "" });
-    const { rows } = await pool.query(
-  `INSERT INTO translations(
+    const { rows } = await pool.query(`INSERT INTO translations(
      project_id, source_lang, target_lang,
      source_text, source_norm, translated_text,
-     context_url, page_path, selector_hash,
+     context_url, page_path, page_canonical, selector_hash,
      checksum, status
    ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9, decode($10,'hex'), 'auto')
    ON CONFLICT (project_id, source_lang, target_lang, source_norm)
@@ -572,11 +582,10 @@ app.post('/translate', async (req, res) => {
     } catch (e) { console.warn('usage_stats (deepl) error:', e.message); }
 
     // 4) Sauvegarde
-    const upsert = await pool.query(
-  `INSERT INTO translations(
+    const upsert = await pool.query(`INSERT INTO translations(
      project_id, source_lang, target_lang,
      source_text, source_norm, translated_text,
-     context_url, page_path, selector_hash, checksum, status
+     context_url, page_path, page_canonical, selector_hash, checksum, status
    ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,decode($10,'hex'),'auto')
    ON CONFLICT (project_id, source_lang, target_lang, source_norm)
    DO UPDATE SET
@@ -648,14 +657,14 @@ app.get("/admin/api/translations", requireAdmin, async (req, res) => {
     const status    = (req.query.status ?? "").toString().trim();
     const from      = (req.query.from ?? "").toString().trim();
     const to        = (req.query.to ?? "").toString().trim();
-    const page_path = (req.query.page_path ?? "").toString().trim();
+    const page_path, page_canonical = (req.query.page_path, page_canonical ?? "").toString().trim();
 
     const where = ["1=1"]; const params = []; let i = 1;
     if (q)        { where.push(`(source_text ILIKE $${i} OR translated_text ILIKE $${i})`); params.push(`%${q}%`); i++; }
     if (status)   { where.push(`status = $${i}`); params.push(status); i++; }
     if (from)     { where.push(`source_lang = $${i}`); params.push(from); i++; }
     if (to)       { where.push(`target_lang = $${i}`); params.push(to); i++; }
-    if (page_path){ where.push(`page_path ILIKE $${i}`); params.push(`%${page_path}%`); i++; }
+    if (page_path, page_canonical){ where.push(`page_path, page_canonical ILIKE $${i}`); params.push(`%${page_path, page_canonical}%`); i++; }
 
     const whereSQL = where.join(" AND ");
     const { rows: totalRows } = await pool.query(
@@ -664,7 +673,7 @@ app.get("/admin/api/translations", requireAdmin, async (req, res) => {
     const total = totalRows[0]?.total ?? 0;
 
     const { rows: items } = await pool.query(
-      `SELECT id, source_lang, target_lang, source_text, translated_text, status, page_path, updated_at
+      `SELECT id, source_lang, target_lang, source_text, translated_text, status, page_path, page_canonical, updated_at
          FROM translations
         WHERE ${whereSQL}
         ORDER BY updated_at DESC
