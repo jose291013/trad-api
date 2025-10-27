@@ -657,7 +657,8 @@ app.get("/admin/api/translations", requireAdmin, async (req, res) => {
     const status    = (req.query.status ?? "").toString().trim();
     const from      = (req.query.from ?? "").toString().trim();
     const to        = (req.query.to ?? "").toString().trim();
-    const page_path, page_canonical = (req.query.page_path, page_canonical ?? "").toString().trim();
+    const page_path = (req.query.page_path ?? "").toString().trim();
+  const page_canonical = canonicalizePath(page_path);
 
     const where = ["1=1"]; const params = []; let i = 1;
     if (q)        { where.push(`(source_text ILIKE $${i} OR translated_text ILIKE $${i})`); params.push(`%${q}%`); i++; }
@@ -731,4 +732,5 @@ console.log("Routes:", __collectRoutes(app).map(r=>`${r.methods} ${r.path}`).sor
 /* ========== Boot ========== */
 const PORT = Number(process.env.PORT) || 10000;
 app.listen(PORT, () => console.log(`✅ API up on :${PORT}`));
+
 
