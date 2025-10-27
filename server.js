@@ -745,12 +745,22 @@ app.post("/admin/api/edit", requireAdmin, async (req, res) => {
       [newText, id]
     );
     if (!rowCount) return res.status(404).json({ error: "Not found" });
+    // ... après le UPDATE et juste avant res.json({ ok:true })
+if (rowCount) {
+  CACHE_NONCE++; // invalide le cache front automatiquement
+}
+
     res.json({ ok: true });
   } catch (e) {
     console.error(e);
     res.status(500).json({ error: e.message });
   }
 });
+// Expose le nonce publiquement pour que le front puisse se synchroniser
+app.get("/cache-nonce", (_req, res) => {
+  res.json({ nonce: CACHE_NONCE });
+});
+
 
 /* ========== Debug (facultatif; tu peux retirer plus tard) ========== */
 function __collectRoutes(appRef){
