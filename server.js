@@ -7,7 +7,6 @@ import cors from "cors";
 const app = express();
 app.use(express.json());
 
-
 // ---- Canonicalization helper: /complete/2574 -> /complete
 function canonicalizePath(raw) {
   if (!raw) return raw;
@@ -49,7 +48,6 @@ function deeplTargetCode(lang2){
   return map[up] || up.toUpperCase();
 }
 
-
 /* ========== CORS ========== */
 const allowList = (process.env.ALLOWED_ORIGINS || "")
   .split(",").map(s => s.trim()).filter(Boolean);
@@ -90,7 +88,7 @@ function requireAdmin(req, res, next) {
   return res.status(401).json({ error: "Unauthorized (admin)" });
 }
 
-/* ========== Back-office HTML (String.raw pour éviter les ${}/backticks) ========== */
+/* ========== Back-office HTML ========== */
 const ADMIN_HTML = String.raw`<!doctype html>
 <html lang="fr"><head>
   <meta charset="utf-8" />
@@ -335,6 +333,37 @@ const makeChecksum = ({ sourceNorm, targetLang, selectorHash = "" }) =>
   crypto.createHash("sha256")
     .update(`${sourceNorm}::${targetLang}::${selectorHash}`).digest("hex");
 
+// --- GABARITS: masquage chiffres / montants / unités ---
+function maskNumbersAndUnits(text="") {
+  const map = [];
+  let i = 0;
+  let out = String(text);
+
+  // Montants/valeurs (€, kg, h, cm, mm, %, etc.)
+  const TOKEN = () => `__TOK${i++}__`;
+  out = out.replace(/([\+\-]?\s*)?(\d[\d\s.,]*)(\s*(?:€|eur|£|gbp|\$|usd|chf|¥|jpy|kg|g|cm|mm|m|h|%))\b/gi, (m) => {
+    const k = TOKEN(); map.push([k, m]); return k;
+  });
+
+  // Nombres "nus"
+  out = out.replace(/\d[\d\s.,-]*/g, (m) => {
+    const k = TOKEN(); map.push([k, m]); return k;
+  });
+
+  return { out, map };
+}
+function unmaskTokens(text="", map=[]) {
+  let res = String(text);
+  for (const [k,v] of map) res = res.replace(k, v);
+  return res;
+}
+function buildPatternKey(text="") {
+  let out = String(text);
+  out = out.replace(/([\+\-]?\s*)?(\d[\d\s.,]*)(\s*(?:€|eur|£|gbp|\$|usd|chf|¥|jpy|kg|g|cm|mm|m|h|%))\b/gi, () => "__NUM__");
+  out = out.replace(/\d[\d\s.,-]*/g, () => "__NUM__");
+  return out.replace(/\s+/g, ' ').trim();
+}
+
 /* ========== DB ========== */
 const makeInternalConn = () => {
   const h = process.env.DB_HOST; const p = process.env.DB_PORT || "5432";
@@ -366,13 +395,10 @@ async function setMode(v) {
   );
 }
 
-/* ========== Usage metrics (réutilise public.usage_stats) ========== */
-// ---------- Log d'usage (UPSERT) ----------
+/* ========== Usage metrics ========== */
 async function logUsage({ projectId, sourceLang, targetLang, fromCache, provider, chars }) {
-  // Normalise
-  const day = new Date().toISOString().slice(0,10); // YYYY-MM-DD
+  const day = new Date().toISOString().slice(0,10);
   const _chars = Math.max(0, (chars|0));
-
   await pool.query(`
     INSERT INTO public.usage_stats(
       day, project_id, source_lang, target_lang, from_cache, provider,
@@ -387,18 +413,16 @@ async function logUsage({ projectId, sourceLang, targetLang, fromCache, provider
   `, [projectId, sourceLang, targetLang, !!fromCache, provider, _chars]);
 }
 
-
 /* ========== DeepL ========== */
 async function translateWithDeepL({ text, sourceLang, targetLang }) {
   const key = process.env.DEEPL_API_KEY;
   if (!key) throw new Error('DEEPL_API_KEY missing');
-
   const url = process.env.DEEPL_API_URL || 'https://api-free.deepl.com/v2/translate';
 
   const body = new URLSearchParams({
     text,
     source_lang: sourceLang.toUpperCase(),
-    target_lang: targetLang.toUpperCase(),
+    target_lang: deeplTargetCode(targetLang),
   });
 
   const r = await fetch(url, {
@@ -413,7 +437,6 @@ async function translateWithDeepL({ text, sourceLang, targetLang }) {
   const data = await r.json();
   return data.translations?.[0]?.text || '';
 }
-
 
 /* ========== Routes publiques ========== */
 app.get("/health", (_req, res) => res.send("OK"));
@@ -430,6 +453,7 @@ app.get("/dbping", async (_req, res) => {
   }
 });
 
+// ---- Cache helper endpoints (inchangés)
 app.post("/cache/find", async (req, res) => {
   try {
     const {
@@ -440,46 +464,42 @@ app.post("/cache/find", async (req, res) => {
     if (!projectId || !sourceLang || !targetLang || !sourceText) {
       return res.status(400).json({ error: "Missing fields" });
     }
-    if ((effectiveSourceLang||'').toUpperCase() === (targetLang||'').toUpperCase()) {
-  return res.json({ from: 'bypass', text: sourceText });
-}
+    // FIX: effectiveSourceLang n'existe pas ici → on compare simplement source/target
+    if ((sourceLang||'').toUpperCase() === (targetLang||'').toUpperCase()) {
+      return res.json({ from: 'bypass', text: sourceText });
+    }
 
     const sourceNorm = normalizeSource(sourceText);
     const sumHex = makeChecksum({ sourceNorm, targetLang, selectorHash });
     const { rows } = await pool.query(
-  `SELECT id, source_text, translated_text, status
-   FROM translations
-   WHERE project_id=$1 AND source_lang=$2 AND target_lang=$3
-     AND checksum = decode($4,'hex')
-   LIMIT 1`,
-  [projectId, sourceLang, targetLang, sumHex]
-);
+      `SELECT id, source_text, translated_text, status
+       FROM translations
+       WHERE project_id=$1 AND source_lang=$2 AND target_lang=$3
+         AND checksum = decode($4,'hex')
+       LIMIT 1`,
+      [projectId, sourceLang, targetLang, sumHex]
+    );
 
-let hit = rows[0] || null;
+    let hit = rows[0] || null;
 
-// 🔁 Fallback si pas trouvé (ignore selectorHash)
-if (!hit) {
-  const { rows: rows2 } = await pool.query(
-    `SELECT id, source_text, translated_text, status
-     FROM translations
-     WHERE project_id=$1 AND source_lang=$2 AND target_lang=$3
-       AND source_norm=$4
-     ORDER BY updated_at DESC
-     LIMIT 1`,
-    [projectId, sourceLang, targetLang, sourceNorm]
-  );
-  // ...
-  hit = rows2[0] || null;
-}
-
-res.json({ hit });
-} catch (e) {
-  console.error(e);
-  res.status(500).json({ error: e.message });
-}
+    if (!hit) {
+      const { rows: rows2 } = await pool.query(
+        `SELECT id, source_text, translated_text, status
+         FROM translations
+         WHERE project_id=$1 AND source_lang=$2 AND target_lang=$3
+           AND source_norm=$4
+         ORDER BY updated_at DESC
+         LIMIT 1`,
+        [projectId, sourceLang, targetLang, sourceNorm]
+      );
+      hit = rows2[0] || null;
+    }
+    res.json({ hit });
+  } catch (e) {
+    console.error(e);
+    res.status(500).json({ error: e.message });
+  }
 });
-
-
 
 app.post("/cache/upsert", async (req, res) => {
   try {
@@ -494,35 +514,33 @@ app.post("/cache/upsert", async (req, res) => {
     const sourceNorm = normalizeSource(sourceText);
     const sumHex = makeChecksum({ sourceNorm, targetLang, selectorHash: selectorHash || "" });
     const { rows } = await pool.query(
-  `INSERT INTO translations(
-     project_id, source_lang, target_lang,
-     source_text, source_norm, translated_text,
-     context_url, page_path, selector_hash,
-     checksum, status
-   ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9, decode($10,'hex'), 'auto')
-   ON CONFLICT (project_id, source_lang, target_lang, source_norm)
-   DO UPDATE SET
-     translated_text = CASE
-       WHEN NOT translations.is_locked THEN EXCLUDED.translated_text
-       ELSE translations.translated_text
-     END,
-     context_url   = COALESCE(EXCLUDED.context_url, translations.context_url),
-     page_path     = COALESCE(EXCLUDED.page_path, translations.page_path),
-     selector_hash = COALESCE(EXCLUDED.selector_hash, translations.selector_hash),
-     checksum      = EXCLUDED.checksum,     -- on garde le dernier checksum calculé
-     updated_at    = now()
-   RETURNING *;`,
-  [projectId, sourceLang, targetLang, sourceText, sourceNorm, translatedText,
-   contextUrl, pagePath, selectorHash, sumHex]
-);
-
+      `INSERT INTO translations(
+         project_id, source_lang, target_lang,
+         source_text, source_norm, translated_text,
+         context_url, page_path, selector_hash,
+         checksum, status
+       ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9, decode($10,'hex'), 'auto')
+       ON CONFLICT (project_id, source_lang, target_lang, source_norm)
+       DO UPDATE SET
+         translated_text = CASE
+           WHEN NOT translations.is_locked THEN EXCLUDED.translated_text
+           ELSE translations.translated_text
+         END,
+         context_url   = COALESCE(EXCLUDED.context_url, translations.context_url),
+         page_path     = COALESCE(EXCLUDED.page_path, translations.page_path),
+         selector_hash = COALESCE(EXCLUDED.selector_hash, translations.selector_hash),
+         checksum      = EXCLUDED.checksum,
+         updated_at    = now()
+       RETURNING *;`,
+      [projectId, sourceLang, targetLang, sourceText, sourceNorm, translatedText,
+       contextUrl, pagePath, selectorHash, sumHex]
+    );
     res.json({ saved: rows[0] });
   } catch (e) {
     console.error(e);
     res.status(500).json({ error: e.message });
   }
 });
-
 
 // ========== Orchestrateur: /translate ==========
 app.post('/translate', async (req, res) => {
@@ -532,6 +550,7 @@ app.post('/translate', async (req, res) => {
       sourceLang, targetLang, sourceText,
       contextUrl = null, pagePath = null, selectorHash = null
     } = req.body || {};
+
     // Detection + canonical + target whitelist
     const detected = await detectLang2(sourceText);
     const effectiveSourceLang = detected || sourceLang;
@@ -539,13 +558,12 @@ app.post('/translate', async (req, res) => {
       return res.status(400).json({ error: 'Unsupported targetLang' });
     }
     const pageCanonical = canonicalizePath(pagePath);
-    
 
-    if (!projectId || !sourceLang || !targetLang || !sourceText) {
+    if (!projectId || !effectiveSourceLang || !targetLang || !sourceText) {
       return res.status(400).json({ error: 'Missing fields' });
     }
 
-    // 0) Ne pas “traduire” FR->FR (ou NL->NL), et bypass chiffres/prix
+    // 0) Bypass FR->FR… + “chiffres seuls”
     if ((effectiveSourceLang||'').toUpperCase() === (targetLang||'').toUpperCase()) {
       return res.json({ from: 'bypass', text: sourceText });
     }
@@ -554,25 +572,50 @@ app.post('/translate', async (req, res) => {
       return res.json({ from: 'bypass', text: sourceText });
     }
 
-    // 1) Cache: d’abord par checksum (inclut selectorHash)…
+    // --- <<< TEMPLATE: clé gabarit prioritaire >>>
     const sourceNorm = normalizeSource(sourceText);
+    const patternKey = buildPatternKey(sourceText);
+
+    // 1) Lookup GABARIT (is_template=true, pattern_key)
+    const { rows: tplRows } = await pool.query(
+      `SELECT translated_text
+         FROM translations
+        WHERE project_id=$1 AND source_lang=$2 AND target_lang=$3
+          AND is_template=true
+          AND pattern_key=$4
+        ORDER BY updated_at DESC
+        LIMIT 1`,
+      [projectId, effectiveSourceLang, targetLang, patternKey]
+    );
+    const templateHit = tplRows[0]?.translated_text || null;
+    if (templateHit) {
+      const { map } = maskNumbersAndUnits(sourceText);
+      const out = unmaskTokens(templateHit, map);
+      try {
+        await logUsage({ provider:'cache', fromCache:true,
+          chars:(sourceText||'').length, projectId,
+          sourceLang: effectiveSourceLang, targetLang });
+      } catch {}
+      return res.json({ from:'cache-template', text: out });
+    }
+
+    // 1.b) Fallback cache “ancien” (checksum + source_norm)
     const sumHex = makeChecksum({
       sourceNorm,
       targetLang,
       selectorHash: selectorHash || ''
     });
+    let cachedText = null;
 
     const hit = await pool.query(
       `SELECT translated_text FROM translations
        WHERE project_id=$1 AND source_lang=$2 AND target_lang=$3
          AND checksum=decode($4,'hex')
        LIMIT 1`,
-      [projectId, sourceLang, targetLang, sumHex]
+      [projectId, effectiveSourceLang, targetLang, sumHex]
     );
+    cachedText = hit.rows[0]?.translated_text || null;
 
-    let cachedText = hit.rows[0]?.translated_text || null;
-
-    // …puis Fallback: même source_norm sans tenir compte du selectorHash
     if (!cachedText) {
       const alt = await pool.query(
         `SELECT translated_text FROM translations
@@ -580,79 +623,77 @@ app.post('/translate', async (req, res) => {
            AND source_norm=$4
          ORDER BY updated_at DESC
          LIMIT 1`,
-        [projectId, sourceLang, targetLang, sourceNorm]
+        [projectId, effectiveSourceLang, targetLang, sourceNorm]
       );
       cachedText = alt.rows[0]?.translated_text || null;
     }
 
     if (cachedText) {
-      // log “cache hit” (protégé pour éviter de casser la trad)
       try {
-        await logUsage({
-          provider: 'cache', fromCache: true,
-          chars: (sourceText || '').length,
-          projectId, sourceLang, targetLang
-        });
-      } catch (e) { console.warn('usage_stats (cache) error:', e.message); }
-
-      return res.json({ from: 'cache', text: cachedText });
+        await logUsage({ provider:'cache', fromCache:true,
+          chars:(sourceText||'').length, projectId,
+          sourceLang: effectiveSourceLang, targetLang });
+      } catch {}
+      return res.json({ from:'cache', text: cachedText });
     }
 
     // 2) DeepL uniquement si autorisé
-    const currentMode = await getMode(); // 'cache-only' | 'cache+deepl'
+    const currentMode = await getMode();
     if (currentMode !== 'cache+deepl') {
       try {
-        await logUsage({
-          provider: 'none', fromCache: false,
-          chars: 0, projectId, sourceLang, targetLang
-        });
-      } catch (e) { console.warn('usage_stats (miss) error:', e.message); }
-
+        await logUsage({ provider:'none', fromCache:false, chars:0,
+          projectId, sourceLang: effectiveSourceLang, targetLang });
+      } catch {}
       return res.status(404).json({ error: 'miss', note: 'cache-only mode' });
     }
 
-    // 3) Appel DeepL
-    const deeplText = await translateWithDeepL({ text: sourceText, sourceLang, targetLang });
+    // 3) APPEL DEEPL sur TEXTE MASQUÉ (gabarit)
+    const { out: masked, map } = maskNumbersAndUnits(sourceText);
+    const deeplMasked = await translateWithDeepL({
+      text: masked,
+      sourceLang: effectiveSourceLang,
+      targetLang
+    });
 
     try {
-      await logUsage({
-        provider: 'deepl', fromCache: false,
-        chars: (sourceText || '').length,
-        projectId, sourceLang, targetLang
-      });
-    } catch (e) { console.warn('usage_stats (deepl) error:', e.message); }
+      await logUsage({ provider:'deepl', fromCache:false,
+        chars:(sourceText||'').length, projectId,
+        sourceLang: effectiveSourceLang, targetLang });
+    } catch {}
 
-    // 4) Sauvegarde
-    const upsert = await pool.query(
-  `INSERT INTO translations(
-     project_id, source_lang, target_lang,
-     source_text, source_norm, translated_text,
-     context_url, page_path, selector_hash, checksum, status
-   ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,decode($10,'hex'),'auto')
-   ON CONFLICT (project_id, source_lang, target_lang, source_norm)
-   DO UPDATE SET
-     translated_text = COALESCE(EXCLUDED.translated_text, translations.translated_text),
-     context_url     = COALESCE(EXCLUDED.context_url,     translations.context_url),
-     page_path       = COALESCE(EXCLUDED.page_path,       translations.page_path),
-     selector_hash   = COALESCE(EXCLUDED.selector_hash,   translations.selector_hash),
-     checksum        = EXCLUDED.checksum,
-     updated_at      = now()
-   RETURNING translated_text`,
-  [projectId, sourceLang, targetLang, sourceText, sourceNorm, deeplText,
-   contextUrl, pagePath, selectorHash, sumHex]
-);
+    // 4) Sauvegarde gabarit (is_template=true, pattern_key)
+    const upsertTpl = await pool.query(
+      `INSERT INTO translations(
+         project_id, source_lang, target_lang,
+         source_text, source_norm, translated_text,
+         context_url, page_path, selector_hash, checksum, status,
+         is_template, pattern_key
+       ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,decode($10,'hex'),'auto', true, $11)
+       ON CONFLICT (project_id, source_lang, target_lang, source_norm)
+       DO UPDATE SET
+         translated_text = COALESCE(EXCLUDED.translated_text, translations.translated_text),
+         context_url     = COALESCE(EXCLUDED.context_url,     translations.context_url),
+         page_path       = COALESCE(EXCLUDED.page_path,       translations.page_path),
+         selector_hash   = COALESCE(EXCLUDED.selector_hash,   translations.selector_hash),
+         checksum        = EXCLUDED.checksum,
+         is_template     = true,
+         pattern_key     = EXCLUDED.pattern_key,
+         updated_at      = now()
+       RETURNING translated_text`,
+      [projectId, effectiveSourceLang, targetLang,
+       masked, normalizeSource(masked), deeplMasked,
+       contextUrl, pageCanonical, selectorHash, sumHex, patternKey]
+    );
 
-
-    const savedText = upsert.rows[0]?.translated_text || deeplText;
-    return res.json({ from: 'deepl', text: savedText });
+    const templateText = upsertTpl.rows[0]?.translated_text || deeplMasked;
+    const finalOut = unmaskTokens(templateText, map);
+    return res.json({ from:'deepl-template', text: finalOut });
 
   } catch (e) {
     console.error('translate error:', e);
     res.status(500).json({ error: e.message });
   }
 });
-
-
 
 /* ========== Admin API ========== */
 app.get("/admin/mode", requireAdmin, async (_req, res) => {
@@ -745,59 +786,23 @@ app.post("/admin/api/edit", requireAdmin, async (req, res) => {
       [newText, id]
     );
     if (!rowCount) return res.status(404).json({ error: "Not found" });
-    // ... après le UPDATE et juste avant res.json({ ok:true })
-if (rowCount) {
-  CACHE_NONCE++; // invalide le cache front automatiquement
-}
-
     res.json({ ok: true });
   } catch (e) {
     console.error(e);
     res.status(500).json({ error: e.message });
   }
 });
-// Expose le nonce publiquement pour que le front puisse se synchroniser
-app.get("/cache-nonce", (_req, res) => {
-  res.json({ nonce: CACHE_NONCE });
-});
-
-
-/* ========== Debug (facultatif; tu peux retirer plus tard) ========== */
-function __collectRoutes(appRef){
-  const routes=[]; appRef._router?.stack?.forEach(m => {
-    if (m.route) {
-      const methods = Object.keys(m.route.methods).join(",").toUpperCase();
-      routes.push({ path: m.route.path, methods });
-    }
-  });
-  return routes;
-}
-app.get("/__routes", (_req,res)=> res.json(__collectRoutes(app).sort((a,b)=>a.path.localeCompare(b.path))));
-app.get("/__version", (_req,res)=> res.json({
-  commit: process.env.RENDER_GIT_COMMIT || null,
-  branch: process.env.RENDER_GIT_BRANCH || null,
-  builtAt: process.env.RENDER_BUILD_TIME || null
-}));
-console.log("Routes:", __collectRoutes(app).map(r=>`${r.methods} ${r.path}`).sort().join(" | "));
 
 // === Front-cache invalidation (nonce) ===
 let CACHE_NONCE = 1;
-
-// Voir la valeur courante (BO)
-app.get("/admin/api/cache-nonce", requireAdmin, (_req, res) => {
-  res.json({ nonce: CACHE_NONCE });
-});
-
-// Incrémente le nonce => invalide les caches front
-app.post("/admin/api/flush-cache", requireAdmin, (_req, res) => {
-  CACHE_NONCE++;
-  res.json({ ok: true, nonce: CACHE_NONCE });
-});
-
+app.get("/cache-nonce", (_req, res) => { res.json({ nonce: CACHE_NONCE }); });
+app.get("/admin/api/cache-nonce", requireAdmin, (_req, res) => { res.json({ nonce: CACHE_NONCE }); });
+app.post("/admin/api/flush-cache", requireAdmin, (_req, res) => { CACHE_NONCE++; res.json({ ok: true, nonce: CACHE_NONCE }); });
 
 /* ========== Boot ========== */
 const PORT = Number(process.env.PORT) || 10000;
 app.listen(PORT, () => console.log(`✅ API up on :${PORT}`));
+
 
 
 
