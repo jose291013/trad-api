@@ -213,42 +213,63 @@ const ADMIN_HTML = String.raw`<!doctype html>
     }
 
     function renderRows(items){
-      const tb = document.querySelector('#grid tbody');
-      tb.innerHTML = '';
-      for(const it of items){
-        const tr = document.getElementById('rowTpl').content.firstElementChild.cloneNode(true);
-        tr.children[0].textContent = it.source_lang + '→' + it.target_lang;
-        tr.children[1].textContent = it.source_text;
+  const tb = document.querySelector('#grid tbody');
+  tb.innerHTML = '';
+  for(const it of items){
+    const tr = document.getElementById('rowTpl').content.firstElementChild.cloneNode(true);
 
-        const tdTrad = tr.children[2];
-        const ta = document.createElement('textarea');
-        ta.value = it.translated_text || '';
-        ta.style.width = '100%'; ta.rows = 3;
-        tdTrad.appendChild(ta);
-
-        tr.children[3].innerHTML = pill(it.status);
-        tr.children[4].textContent = it.page_path || '';
-        tr.children[5].textContent = new Date(it.updated_at).toLocaleString();
-
-        const btnSave = document.createElement('button');
-        btnSave.textContent = 'Enregistrer';
-        btnSave.onclick = async () => {
-          const newText = ta.value.trim();
-          if (!newText) { alert('Texte vide.'); return; }
-          const reviewerEmail = prompt('Votre email (pour l’historique):', '') || 'unknown';
-          const reason = prompt('Motif (optionnel):', '') || null;
-          const r = await fetch('/admin/api/edit', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + token },
-            body: JSON.stringify({ id: it.id, newText, reviewerEmail, reason })
-          });
-          if (r.ok) { alert('Sauvegardé ✓'); fetchList(); }
-          else { const t = await r.text(); alert('Erreur: ' + t); }
-        };
-        tr.children[6].appendChild(btnSave);
-        tb.appendChild(tr);
-      }
+    // Colonne Langs + badge tpl
+    tr.children[0].textContent = it.source_lang + '→' + it.target_lang;
+    if (it.is_template) {
+      const b = document.createElement('span');
+      b.className = 'pill status-review_needed';
+      b.style.marginLeft = '6px';
+      b.textContent = 'tpl';
+      tr.children[0].appendChild(b);
     }
+
+    // ✅ D’abord le texte source…
+    tr.children[1].textContent = it.source_text || '';
+
+    // …puis on ajoute la ligne "pattern:"
+    if (it.is_template && it.pattern_key) {
+      const small = document.createElement('div');
+      small.className = 'muted txt-sm';
+      small.textContent = 'pattern: ' + it.pattern_key;
+      tr.children[1].appendChild(small);
+    }
+
+    // Reste inchangé
+    const tdTrad = tr.children[2];
+    const ta = document.createElement('textarea');
+    ta.value = it.translated_text || '';
+    ta.style.width = '100%'; ta.rows = 3;
+    tdTrad.appendChild(ta);
+
+    tr.children[3].innerHTML = pill(it.status);
+    tr.children[4].textContent = it.page_path || '';
+    tr.children[5].textContent = new Date(it.updated_at).toLocaleString();
+
+    const btnSave = document.createElement('button');
+    btnSave.textContent = 'Enregistrer';
+    btnSave.onclick = async () => {
+      const newText = ta.value.trim();
+      if (!newText) { alert('Texte vide.'); return; }
+      const reviewerEmail = prompt('Votre email (pour l’historique):', '') || 'unknown';
+      const reason = prompt('Motif (optionnel):', '') || null;
+      const r = await fetch('/admin/api/edit', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + token },
+        body: JSON.stringify({ id: it.id, newText, reviewerEmail, reason })
+      });
+      if (r.ok) { alert('Sauvegardé ✓'); fetchList(); }
+      else { const t = await r.text(); alert('Erreur: ' + t); }
+    };
+    tr.children[6].appendChild(btnSave);
+    tb.appendChild(tr);
+  }
+}
+
 
     function renderMode(mode) {
       const span = document.getElementById('modePill');
@@ -756,11 +777,15 @@ app.get("/admin/api/translations", requireAdmin, async (req, res) => {
     const total = totalRows[0]?.total ?? 0;
 
     const { rows: items } = await pool.query(
-      `SELECT id, source_lang, target_lang, source_text, translated_text, status, page_path, updated_at
-         FROM translations
-        WHERE ${whereSQL}
-        ORDER BY updated_at DESC
-        LIMIT ${limit} OFFSET ${offset}`,
+      `SELECT id, source_lang, target_lang,
+       source_text, translated_text, status,
+       page_path, updated_at,
+       is_template, pattern_key
+  FROM translations
+ WHERE ${whereSQL}
+ ORDER BY updated_at DESC
+ LIMIT ${limit} OFFSET ${offset}
+`,
       params
     );
 
