@@ -144,6 +144,9 @@ const ADMIN_HTML = String.raw`<!doctype html>
       <span id="modePill" class="pill status-auto">DeepL : …</span>
       <button id="deeplOn">Activer DeepL</button>
       <button id="deeplOff">Désactiver DeepL</button>
+      <button id="flushBtn">Vider le cache</button>
+<span id="noncePill" class="pill" style="background:#eef">nonce: …</span>
+
       <span id="statsPill" class="pill" style="background:#eef">—</span>
     </div>
 
@@ -320,6 +323,38 @@ const ADMIN_HTML = String.raw`<!doctype html>
 
     document.getElementById('deeplOn').onclick  = () => setMode('cache+deepl');
     document.getElementById('deeplOff').onclick = () => setMode('cache-only');
+    document.getElementById('flushBtn').onclick = async () => {
+  if (!confirm('Confirmer le vidage du cache front ?')) return;
+  try{
+    const r = await fetch('/admin/api/flush-cache', {
+      method: 'POST',
+      headers: { 'Authorization':'Bearer '+token }
+    });
+    if(!r.ok){ const t = await r.text(); alert('Erreur: '+t); return; }
+    const js = await r.json();
+    alert('Cache vidé ✓ (nonce = '+js.nonce+')');
+    loadNonce();
+  }catch(e){
+    alert('Erreur: '+e.message);
+  }
+};
+
+
+    async function loadNonce(){
+  try{
+    const r = await fetch('/admin/api/cache-nonce', {
+      headers: { 'Authorization':'Bearer '+token }
+    });
+    if(!r.ok) throw new Error('HTTP '+r.status);
+    const js = await r.json();
+    const el = document.getElementById('noncePill');
+    if (el) el.textContent = 'nonce: ' + js.nonce;
+  }catch(e){
+    const el = document.getElementById('noncePill');
+    if (el) el.textContent = 'nonce: (indispo)';
+  }
+}
+
 
     async function setMode(mode) {
       try {
@@ -337,6 +372,8 @@ const ADMIN_HTML = String.raw`<!doctype html>
     loadMode();
     loadStats();
     fetchList();
+    loadNonce();
+
   </script>
 </body></html>`;
 
