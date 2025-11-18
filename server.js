@@ -521,6 +521,29 @@ app.post("/cache/find", async (req, res) => {
       sourceLang, targetLang, sourceText,
       selectorHash = "",
     } = req.body || {};
+// --- Ne pas traduire les adresses, emails, téléphones, n° client, etc.
+const txt = (sourceText || "").trim();
+
+// Adresse postale typique (numéro + rue / calle / avenida / etc.)
+const ADDRESS_RX = /\d{1,5}\s+\S+.*(rue|avenue|av\.|bd|boulevard|impasse|allée|place|plaza|calle|carrer|via|strasse|straat)/i;
+
+// Email, URL, téléphone
+const EMAIL_OR_URL_RX = /@|https?:\/\//i;
+const PHONE_RX        = /(\+?\d[\d\s().-]{5,})/;
+
+// Nom/prénom/société très courts (ex: "Juan Pérez", "ACME S.A.")
+const SHORT_NAME_RX = /^[A-ZÉÈÀÂÇ][^\d]{1,40}$/i; // 1 ou 2 mots sans chiffres
+
+if (
+  ADDRESS_RX.test(txt) ||
+  EMAIL_OR_URL_RX.test(txt) ||
+  PHONE_RX.test(txt) ||
+  (txt.length <= 40 && SHORT_NAME_RX.test(txt))
+) {
+  return res.json({ from: 'bypass', text: sourceText });
+}
+
+
     if (!projectId || !sourceLang || !targetLang || !sourceText) {
       return res.status(400).json({ error: "Missing fields" });
     }
@@ -612,7 +635,11 @@ app.post('/translate', async (req, res) => {
 
     // Detection + canonical + target whitelist
     const detected = await detectLang2(sourceText);
-    const effectiveSourceLang = detected || sourceLang;
+
+// On respecte d'abord ce que le front envoie (FR), et on n'utilise la détection
+// qu'en secours si jamais sourceLang est vide.
+const effectiveSourceLang = (sourceLang || detected || 'fr').toUpperCase();
+
     if (!ALLOWED_TARGETS.has((targetLang||'').toLowerCase())) {
       return res.status(400).json({ error: 'Unsupported targetLang' });
     }
