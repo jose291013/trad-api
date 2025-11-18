@@ -760,28 +760,39 @@ if (!providerEnabled) {
     } catch {}
 
     // 4) Sauvegarde gabarit (is_template=true, pattern_key)
-    const upsertTpl = await pool.query(
-      `INSERT INTO translations(
-         project_id, source_lang, target_lang,
-         source_text, source_norm, translated_text,
-         context_url, page_path, selector_hash, checksum, status,
-         is_template, pattern_key
-       ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,decode($10,'hex'),'auto', true, $11)
-       ON CONFLICT (project_id, source_lang, target_lang, source_norm)
-       DO UPDATE SET
-         translated_text = COALESCE(EXCLUDED.translated_text, translations.translated_text),
-         context_url     = COALESCE(EXCLUDED.context_url,     translations.context_url),
-         page_path       = COALESCE(EXCLUDED.page_path,       translations.page_path),
-         selector_hash   = COALESCE(EXCLUDED.selector_hash,   translations.selector_hash),
-         checksum        = EXCLUDED.checksum,
-         is_template     = true,
-         pattern_key     = EXCLUDED.pattern_key,
-         updated_at      = now()
-       RETURNING translated_text`,
-      [projectId, effectiveSourceLang, targetLang,
-       masked, normalizeSource(masked), aiMasked,
-       contextUrl, pageCanonical, selectorHash, sumHex, patternKey]
-    );
+const upsertTpl = await pool.query(
+  `INSERT INTO translations(
+     project_id, source_lang, target_lang,
+     source_text, source_norm, translated_text,
+     context_url, page_path, selector_hash, checksum, status,
+     is_template, pattern_key
+   ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,decode($10,'hex'),'auto', true, $11)
+   ON CONFLICT (project_id, source_lang, target_lang, source_norm)
+   DO UPDATE SET
+     translated_text = COALESCE(EXCLUDED.translated_text, translations.translated_text),
+     context_url     = COALESCE(EXCLUDED.context_url,     translations.context_url),
+     page_path       = COALESCE(EXCLUDED.page_path,       translations.page_path),
+     selector_hash   = COALESCE(EXCLUDED.selector_hash,   translations.selector_hash),
+     checksum        = EXCLUDED.checksum,
+     is_template     = true,
+     pattern_key     = EXCLUDED.pattern_key,
+     updated_at      = now()
+   RETURNING translated_text`,
+  [
+    projectId,
+    effectiveSourceLang,
+    targetLang,
+    sourceText,                  // 👈 TEXTE ORIGINAL (plus de TOK ici)
+    normalizeSource(sourceText), // 👈 normalisation du texte original
+    aiMasked,                    // 👈 traduction masquée avec TOK
+    contextUrl,
+    pageCanonical,
+    selectorHash,
+    sumHex,
+    patternKey
+  ]
+);
+
 
     const templateText = upsertTpl.rows[0]?.translated_text || aiMasked;
     const finalOut = unmaskTokens(templateText, map);
