@@ -3,9 +3,14 @@ import express from "express";
 import { Pool } from "pg";
 import crypto from "node:crypto";
 import cors from "cors";
+import OpenAI from "openai";
 
 const app = express();
 app.use(express.json());
+
+const openai = new OpenAI({
+  apiKey: process.env.OPENAI_API_KEY || "",
+});
 
 // ---- Canonicalization helper: /complete/2574 -> /complete
 function canonicalizePath(raw) {
@@ -40,13 +45,8 @@ async function detectLang2(text){
   return ISO3_TO_ISO2[code3] || null;
 }
 
-// ---- Target language allow-list + DeepL mapping (ES enabled)
+// ---- Target language allow-list
 const ALLOWED_TARGETS = new Set(['nl','en','es','de','it','pt','fr']);
-function deeplTargetCode(lang2){
-  const up = (lang2||'').toLowerCase();
-  const map = { en:'EN-GB', fr:'FR', nl:'NL', es:'ES', de:'DE', it:'IT', pt:'PT-PT' };
-  return map[up] || up.toUpperCase();
-}
 
 /* ========== CORS ========== */
 const allowList = (process.env.ALLOWED_ORIGINS || "")
@@ -141,11 +141,11 @@ const ADMIN_HTML = String.raw`<!doctype html>
     </div>
 
     <div class="row">
-      <span id="modePill" class="pill status-auto">DeepL : …</span>
-      <button id="deeplOn">Activer DeepL</button>
-      <button id="deeplOff">Désactiver DeepL</button>
+      <span id="modePill" class="pill status-auto">IA (OpenAI) : …</span>
+      <button id="deeplOn">Activer IA</button>
+      <button id="deeplOff">Désactiver IA</button>
       <button id="flushBtn">Vider le cache</button>
-<span id="noncePill" class="pill" style="background:#eef">nonce: …</span>
+      <span id="noncePill" class="pill" style="background:#eef">nonce: …</span>
 
       <span id="statsPill" class="pill" style="background:#eef">—</span>
     </div>
@@ -216,69 +216,67 @@ const ADMIN_HTML = String.raw`<!doctype html>
     }
 
     function renderRows(items){
-  const tb = document.querySelector('#grid tbody');
-  tb.innerHTML = '';
-  for(const it of items){
-    const tr = document.getElementById('rowTpl').content.firstElementChild.cloneNode(true);
+      const tb = document.querySelector('#grid tbody');
+      tb.innerHTML = '';
+      for(const it of items){
+        const tr = document.getElementById('rowTpl').content.firstElementChild.cloneNode(true);
 
-    // Colonne Langs + badge tpl
-    tr.children[0].textContent = it.source_lang + '→' + it.target_lang;
-    if (it.is_template) {
-      const b = document.createElement('span');
-      b.className = 'pill status-review_needed';
-      b.style.marginLeft = '6px';
-      b.textContent = 'tpl';
-      tr.children[0].appendChild(b);
+        // Colonne Langs + badge tpl
+        tr.children[0].textContent = it.source_lang + '→' + it.target_lang;
+        if (it.is_template) {
+          const b = document.createElement('span');
+          b.className = 'pill status-review_needed';
+          b.style.marginLeft = '6px';
+          b.textContent = 'tpl';
+          tr.children[0].appendChild(b);
+        }
+
+        // ✅ D’abord le texte source…
+        tr.children[1].textContent = it.source_text || '';
+
+        // …puis on ajoute la ligne "pattern:"
+        if (it.is_template && it.pattern_key) {
+          const small = document.createElement('div');
+          small.className = 'muted txt-sm';
+          small.textContent = 'pattern: ' + it.pattern_key;
+          tr.children[1].appendChild(small);
+        }
+
+        const tdTrad = tr.children[2];
+        const ta = document.createElement('textarea');
+        ta.value = it.translated_text || '';
+        ta.style.width = '100%'; ta.rows = 3;
+        tdTrad.appendChild(ta);
+
+        tr.children[3].innerHTML = pill(it.status);
+        tr.children[4].textContent = it.page_path || '';
+        tr.children[5].textContent = new Date(it.updated_at).toLocaleString();
+
+        const btnSave = document.createElement('button');
+        btnSave.textContent = 'Enregistrer';
+        btnSave.onclick = async () => {
+          const newText = ta.value.trim();
+          if (!newText) { alert('Texte vide.'); return; }
+          const reviewerEmail = prompt('Votre email (pour l’historique):', '') || 'unknown';
+          const reason = prompt('Motif (optionnel):', '') || null;
+          const r = await fetch('/admin/api/edit', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + token },
+            body: JSON.stringify({ id: it.id, newText, reviewerEmail, reason })
+          });
+          if (r.ok) { alert('Sauvegardé ✓'); fetchList(); }
+          else { const t = await r.text(); alert('Erreur: ' + t); }
+        };
+        tr.children[6].appendChild(btnSave);
+        tb.appendChild(tr);
+      }
     }
-
-    // ✅ D’abord le texte source…
-    tr.children[1].textContent = it.source_text || '';
-
-    // …puis on ajoute la ligne "pattern:"
-    if (it.is_template && it.pattern_key) {
-      const small = document.createElement('div');
-      small.className = 'muted txt-sm';
-      small.textContent = 'pattern: ' + it.pattern_key;
-      tr.children[1].appendChild(small);
-    }
-
-    // Reste inchangé
-    const tdTrad = tr.children[2];
-    const ta = document.createElement('textarea');
-    ta.value = it.translated_text || '';
-    ta.style.width = '100%'; ta.rows = 3;
-    tdTrad.appendChild(ta);
-
-    tr.children[3].innerHTML = pill(it.status);
-    tr.children[4].textContent = it.page_path || '';
-    tr.children[5].textContent = new Date(it.updated_at).toLocaleString();
-
-    const btnSave = document.createElement('button');
-    btnSave.textContent = 'Enregistrer';
-    btnSave.onclick = async () => {
-      const newText = ta.value.trim();
-      if (!newText) { alert('Texte vide.'); return; }
-      const reviewerEmail = prompt('Votre email (pour l’historique):', '') || 'unknown';
-      const reason = prompt('Motif (optionnel):', '') || null;
-      const r = await fetch('/admin/api/edit', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + token },
-        body: JSON.stringify({ id: it.id, newText, reviewerEmail, reason })
-      });
-      if (r.ok) { alert('Sauvegardé ✓'); fetchList(); }
-      else { const t = await r.text(); alert('Erreur: ' + t); }
-    };
-    tr.children[6].appendChild(btnSave);
-    tb.appendChild(tr);
-  }
-}
-
 
     function renderMode(mode) {
       const span = document.getElementById('modePill');
       if (!span) return;
       const on = (mode === 'cache+deepl');
-      span.textContent = 'DeepL : ' + (on ? 'ON' : 'OFF');
+      span.textContent = 'IA (OpenAI) : ' + (on ? 'ON' : 'OFF');
       span.className = 'pill ' + (on ? 'status-approved' : 'status-rejected');
     }
 
@@ -306,7 +304,7 @@ const ADMIN_HTML = String.raw`<!doctype html>
         const miss  = Number(today.cache_miss  || 0);
         const pill = document.getElementById('statsPill');
         pill.textContent =
-          "Aujourd'hui — DeepL: " + calls +
+          "Aujourd'hui — IA (OpenAI): " + calls +
           " req / " + chars.toLocaleString() +
           " car. · Cache: " + hits +
           " hit / " + miss + " miss";
@@ -324,37 +322,35 @@ const ADMIN_HTML = String.raw`<!doctype html>
     document.getElementById('deeplOn').onclick  = () => setMode('cache+deepl');
     document.getElementById('deeplOff').onclick = () => setMode('cache-only');
     document.getElementById('flushBtn').onclick = async () => {
-  if (!confirm('Confirmer le vidage du cache front ?')) return;
-  try{
-    const r = await fetch('/admin/api/flush-cache', {
-      method: 'POST',
-      headers: { 'Authorization':'Bearer '+token }
-    });
-    if(!r.ok){ const t = await r.text(); alert('Erreur: '+t); return; }
-    const js = await r.json();
-    alert('Cache vidé ✓ (nonce = '+js.nonce+')');
-    loadNonce();
-  }catch(e){
-    alert('Erreur: '+e.message);
-  }
-};
-
+      if (!confirm('Confirmer le vidage du cache front ?')) return;
+      try{
+        const r = await fetch('/admin/api/flush-cache', {
+          method: 'POST',
+          headers: { 'Authorization':'Bearer '+token }
+        });
+        if(!r.ok){ const t = await r.text(); alert('Erreur: '+t); return; }
+        const js = await r.json();
+        alert('Cache vidé ✓ (nonce = '+js.nonce+')');
+        loadNonce();
+      }catch(e){
+        alert('Erreur: '+e.message);
+      }
+    };
 
     async function loadNonce(){
-  try{
-    const r = await fetch('/admin/api/cache-nonce', {
-      headers: { 'Authorization':'Bearer '+token }
-    });
-    if(!r.ok) throw new Error('HTTP '+r.status);
-    const js = await r.json();
-    const el = document.getElementById('noncePill');
-    if (el) el.textContent = 'nonce: ' + js.nonce;
-  }catch(e){
-    const el = document.getElementById('noncePill');
-    if (el) el.textContent = 'nonce: (indispo)';
-  }
-}
-
+      try{
+        const r = await fetch('/admin/api/cache-nonce', {
+          headers: { 'Authorization':'Bearer '+token }
+        });
+        if(!r.ok) throw new Error('HTTP '+r.status);
+        const js = await r.json();
+        const el = document.getElementById('noncePill');
+        if (el) el.textContent = 'nonce: ' + js.nonce;
+      }catch(e){
+        const el = document.getElementById('noncePill');
+        if (el) el.textContent = 'nonce: (indispo)';
+      }
+    }
 
     async function setMode(mode) {
       try {
@@ -471,29 +467,35 @@ async function logUsage({ projectId, sourceLang, targetLang, fromCache, provider
   `, [projectId, sourceLang, targetLang, !!fromCache, provider, _chars]);
 }
 
-/* ========== DeepL ========== */
-async function translateWithDeepL({ text, sourceLang, targetLang }) {
-  const key = process.env.DEEPL_API_KEY;
-  if (!key) throw new Error('DEEPL_API_KEY missing');
-  const url = process.env.DEEPL_API_URL || 'https://api-free.deepl.com/v2/translate';
+/* ========== OpenAI (ChatGPT) ========== */
+async function translateWithOpenAI({ text, sourceLang, targetLang }) {
+  const apiKey = process.env.OPENAI_API_KEY;
+  if (!apiKey) throw new Error("OPENAI_API_KEY missing");
 
-  const body = new URLSearchParams({
-    text,
-    source_lang: sourceLang.toUpperCase(),
-    target_lang: deeplTargetCode(targetLang),
+  const model = process.env.OPENAI_MODEL || "gpt-4.1-mini";
+
+  const systemPrompt = `
+Tu es un moteur de traduction professionnel.
+- Tu traduis du ${sourceLang} vers le ${targetLang}.
+- Tu ne rajoutes pas d'information.
+- Tu ne reformules pas pour faire "plus joli".
+- Tu conserves les balises HTML éventuelles.
+- Tu conserves exactement les variables entre {accolades} ou %PLACEHOLDER%.
+- Tu conserves les nombres, unités et symboles tels quels.
+Réponds uniquement avec le texte traduit, sans guillemets ni commentaire.
+`.trim();
+
+  const response = await openai.chat.completions.create({
+    model,
+    temperature: 0.2,
+    messages: [
+      { role: "system", content: systemPrompt },
+      { role: "user", content: text }
+    ]
   });
 
-  const r = await fetch(url, {
-    method: 'POST',
-    headers: {
-      Authorization: `DeepL-Auth-Key ${key}`,
-      'Content-Type': 'application/x-www-form-urlencoded'
-    },
-    body
-  });
-  if (!r.ok) throw new Error(`DeepL ${r.status} ${await r.text()}`);
-  const data = await r.json();
-  return data.translations?.[0]?.text || '';
+  const out = response.choices?.[0]?.message?.content || "";
+  return out.trim();
 }
 
 /* ========== Routes publiques ========== */
@@ -522,7 +524,6 @@ app.post("/cache/find", async (req, res) => {
     if (!projectId || !sourceLang || !targetLang || !sourceText) {
       return res.status(400).json({ error: "Missing fields" });
     }
-    // FIX: effectiveSourceLang n'existe pas ici → on compare simplement source/target
     if ((sourceLang||'').toUpperCase() === (targetLang||'').toUpperCase()) {
       return res.json({ from: 'bypass', text: sourceText });
     }
@@ -695,7 +696,7 @@ app.post('/translate', async (req, res) => {
       return res.json({ from:'cache', text: cachedText });
     }
 
-    // 2) DeepL uniquement si autorisé
+    // 2) OpenAI uniquement si autorisé (mode = cache+deepl, réutilisé pour IA)
     const currentMode = await getMode();
     if (currentMode !== 'cache+deepl') {
       try {
@@ -705,16 +706,16 @@ app.post('/translate', async (req, res) => {
       return res.status(404).json({ error: 'miss', note: 'cache-only mode' });
     }
 
-    // 3) APPEL DEEPL sur TEXTE MASQUÉ (gabarit)
+    // 3) APPEL OpenAI sur TEXTE MASQUÉ (gabarit)
     const { out: masked, map } = maskNumbersAndUnits(sourceText);
-    const deeplMasked = await translateWithDeepL({
+    const aiMasked = await translateWithOpenAI({
       text: masked,
       sourceLang: effectiveSourceLang,
       targetLang
     });
 
     try {
-      await logUsage({ provider:'deepl', fromCache:false,
+      await logUsage({ provider:'openai', fromCache:false,
         chars:(sourceText||'').length, projectId,
         sourceLang: effectiveSourceLang, targetLang });
     } catch {}
@@ -739,13 +740,13 @@ app.post('/translate', async (req, res) => {
          updated_at      = now()
        RETURNING translated_text`,
       [projectId, effectiveSourceLang, targetLang,
-       masked, normalizeSource(masked), deeplMasked,
+       masked, normalizeSource(masked), aiMasked,
        contextUrl, pageCanonical, selectorHash, sumHex, patternKey]
     );
 
-    const templateText = upsertTpl.rows[0]?.translated_text || deeplMasked;
+    const templateText = upsertTpl.rows[0]?.translated_text || aiMasked;
     const finalOut = unmaskTokens(templateText, map);
-    return res.json({ from:'deepl-template', text: finalOut });
+    return res.json({ from:'openai-template', text: finalOut });
 
   } catch (e) {
     console.error('translate error:', e);
@@ -776,10 +777,10 @@ app.post("/admin/mode", requireAdmin, async (req, res) => {
 app.get("/admin/stats", requireAdmin, async (_req, res) => {
   const { rows: todayRows } = await pool.query(
     `SELECT
-        SUM( (provider='deepl')::int )                               AS deepl_calls,
-        SUM( CASE WHEN provider='deepl' THEN chars_count ELSE 0 END ) AS deepl_chars,
+        SUM( (provider='openai')::int )                               AS deepl_calls,
+        SUM( CASE WHEN provider='openai' THEN chars_count ELSE 0 END ) AS deepl_chars,
         SUM( (from_cache=true)::int )                                AS cache_hits,
-        SUM( (from_cache=false AND provider<>'deepl')::int )         AS cache_miss
+        SUM( (from_cache=false AND provider<>'openai')::int )        AS cache_miss
      FROM public.usage_stats
      WHERE day = CURRENT_DATE`
   );
@@ -862,8 +863,9 @@ app.get("/admin/api/cache-nonce", requireAdmin, (_req, res) => { res.json({ nonc
 app.post("/admin/api/flush-cache", requireAdmin, (_req, res) => { CACHE_NONCE++; res.json({ ok: true, nonce: CACHE_NONCE }); });
 
 /* ========== Boot ========== */
-const PORT = Number(process.env.PORT) || 10000;
+const PORT = Number(process.env.PORT) || 3000;
 app.listen(PORT, () => console.log(`✅ API up on :${PORT}`));
+
 
 
 
