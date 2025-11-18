@@ -631,13 +631,13 @@ app.post('/translate', async (req, res) => {
       (txt.split(",").length - 1) >= 2; // plusieurs virgules = souvent adresse
 
     if (
-      looksLikeAddress ||
-      EMAIL_OR_URL_RX.test(txt) ||
-      PHONE_RX.test(txt) ||
-      (txt.length <= 40 && SHORT_NAME_RX.test(txt))
-    ) {
-      return res.json({ from: 'bypass', text: sourceText });
-    }
+  looksLikeAddress ||
+  EMAIL_OR_URL_RX.test(txt) ||
+  PHONE_RX.test(txt)
+) {
+  return res.json({ from: 'bypass', text: sourceText });
+}
+
 
 
     // Detection + canonical + target whitelist
