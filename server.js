@@ -656,14 +656,12 @@ const effectiveSourceLang = (sourceLang || detected || 'fr').toUpperCase();
       return res.status(400).json({ error: 'Missing fields' });
     }
 
-    // 0) Bypass FR->FR… + “chiffres seuls”
-   if ((sourceLang||'').toUpperCase() === (targetLang||'').toUpperCase()) {
+    // 0) Bypass uniquement pour les textes purement numériques / montants
+const NUMERIC_RX = /^\s*[\d\s\u00A0.,:+\-/%()]*\s*(?:€|EUR|£|GBP|\$|USD|CHF|¥|JPY|₽|PLN|CZK|HUF|SEK|NOK|DKK)?\s*$/i;
+if (NUMERIC_RX.test(sourceText || '')) {
   return res.json({ from: 'bypass', text: sourceText });
 }
-    const NUMERIC_RX = /^\s*[\d\s\u00A0.,:+\-/%()]*\s*(?:€|EUR|£|GBP|\$|USD|CHF|¥|JPY|₽|PLN|CZK|HUF|SEK|NOK|DKK)?\s*$/i;
-    if (NUMERIC_RX.test(sourceText || '')) {
-      return res.json({ from: 'bypass', text: sourceText });
-    }
+
 
     // --- <<< TEMPLATE: clé gabarit prioritaire >>>
     const sourceNorm = normalizeSource(sourceText);
