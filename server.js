@@ -731,14 +731,20 @@ const effectiveSourceLang = (sourceLang || detected || 'fr').toUpperCase();
     }
 
     // 2) OpenAI uniquement si autorisé (mode = cache+deepl, réutilisé pour IA)
-    const currentMode = await getMode();
-    if (currentMode !== 'cache+deepl') {
-      try {
-        await logUsage({ provider:'none', fromCache:false, chars:0,
-          projectId, sourceLang: effectiveSourceLang, targetLang });
-      } catch {}
-      return res.status(404).json({ error: 'miss', note: 'cache-only mode' });
-    }
+    // 2) Appel provider externe uniquement si autorisé
+const currentMode = (await getMode() || '').toLowerCase();
+
+// tout ce qui commence par 'cache+' active le moteur externe
+const providerEnabled = currentMode.startsWith('cache+');
+
+if (!providerEnabled) {
+  try {
+    await logUsage({ provider:'none', fromCache:false, chars:0,
+      projectId, sourceLang: effectiveSourceLang, targetLang });
+  } catch {}
+  return res.status(404).json({ error: 'miss', note: currentMode || 'cache-only mode' });
+}
+
 
     // 3) APPEL OpenAI sur TEXTE MASQUÉ (gabarit)
     const { out: masked, map } = maskNumbersAndUnits(sourceText);
@@ -796,16 +802,19 @@ app.get("/admin/mode", requireAdmin, async (_req, res) => {
   } catch (e) { console.error(e); res.status(500).json({ error: e.message }); }
 });
 
+const ALLOWED_MODES = ['cache-only', 'cache+deepl', 'cache+openai'];
+
 app.post("/admin/mode", requireAdmin, async (req, res) => {
   try {
     const { mode } = req.body || {};
-    if (!['cache-only', 'cache+deepl'].includes(mode)) {
-      return res.status(400).json({ error: "mode must be 'cache-only' or 'cache+deepl'" });
+    if (!ALLOWED_MODES.includes(mode)) {
+      return res.status(400).json({ error: "mode must be one of: " + ALLOWED_MODES.join(', ') });
     }
     await setMode(mode);
     res.json({ mode });
   } catch (e) { console.error(e); res.status(500).json({ error: e.message }); }
 });
+
 
 // Stats (agrège usage_stats)
 app.get("/admin/stats", requireAdmin, async (_req, res) => {
