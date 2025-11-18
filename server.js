@@ -521,34 +521,11 @@ app.post("/cache/find", async (req, res) => {
       sourceLang, targetLang, sourceText,
       selectorHash = "",
     } = req.body || {};
-// --- Ne pas traduire les adresses, emails, téléphones, n° client, etc.
-const txt = (sourceText || "").trim();
-
-// Adresse postale typique (numéro + rue / calle / avenida / etc.)
-const ADDRESS_RX = /\d{1,5}\s+\S+.*(rue|avenue|av\.|bd|boulevard|impasse|allée|place|plaza|calle|carrer|via|strasse|straat)/i;
-
-// Email, URL, téléphone
-const EMAIL_OR_URL_RX = /@|https?:\/\//i;
-const PHONE_RX        = /(\+?\d[\d\s().-]{5,})/;
-
-// Nom/prénom/société très courts (ex: "Juan Pérez", "ACME S.A.")
-const SHORT_NAME_RX = /^[A-ZÉÈÀÂÇ][^\d]{1,40}$/i; // 1 ou 2 mots sans chiffres
-
-if (
-  ADDRESS_RX.test(txt) ||
-  EMAIL_OR_URL_RX.test(txt) ||
-  PHONE_RX.test(txt) ||
-  (txt.length <= 40 && SHORT_NAME_RX.test(txt))
-) {
-  return res.json({ from: 'bypass', text: sourceText });
-}
-
-
     if (!projectId || !sourceLang || !targetLang || !sourceText) {
       return res.status(400).json({ error: "Missing fields" });
     }
-    if ((sourceLang||'').toUpperCase() === (targetLang||'').toUpperCase()) {
-      return res.json({ from: 'bypass', text: sourceText });
+    if ((sourceLang || "").toUpperCase() === (targetLang || "").toUpperCase()) {
+      return res.json({ from: "bypass", text: sourceText });
     }
 
     const sourceNorm = normalizeSource(sourceText);
@@ -582,6 +559,7 @@ if (
     res.status(500).json({ error: e.message });
   }
 });
+
 
 app.post("/cache/upsert", async (req, res) => {
   try {
@@ -632,6 +610,35 @@ app.post('/translate', async (req, res) => {
       sourceLang, targetLang, sourceText,
       contextUrl = null, pagePath = null, selectorHash = null
     } = req.body || {};
+
+        // --- Ne pas traduire les adresses, emails, téléphones, noms/sociétés très courts
+    const txt = (sourceText || "").trim();
+
+    // Adresse FR/ES typique : numéro + mot clé rue/avenue/calle… (+ souvent un CP)
+    const ADDRESS_RX = /\b\d{1,5}\s+(rue|avenue|av\.|bd|boulevard|impasse|all[ée]e?|place|plaza|calle|carrer|via|strasse|straße|straat|road|rd\.|street|st\.|lane|ln\.|way)\b/i;
+    const POSTAL_CODE_RX = /\b\d{4,5}\b/;  // 75010, 08015, etc.
+
+    // Email, URL, téléphone
+    const EMAIL_OR_URL_RX = /@|https?:\/\//i;
+    const PHONE_RX        = /(\+?\d[\d\s().-]{5,})/;
+
+    // Nom/prénom/société très courts (1 ou 2 mots, sans chiffres)
+    const SHORT_NAME_RX = /^[A-ZÉÈÀÂÇ][^\d]{1,40}$/i;
+
+    // Heuristique globale : si ça ressemble clairement à une adresse OU à un contact, on ne traduit pas
+    const looksLikeAddress =
+      (ADDRESS_RX.test(txt) && POSTAL_CODE_RX.test(txt)) ||
+      (txt.split(",").length - 1) >= 2; // plusieurs virgules = souvent adresse
+
+    if (
+      looksLikeAddress ||
+      EMAIL_OR_URL_RX.test(txt) ||
+      PHONE_RX.test(txt) ||
+      (txt.length <= 40 && SHORT_NAME_RX.test(txt))
+    ) {
+      return res.json({ from: 'bypass', text: sourceText });
+    }
+
 
     // Detection + canonical + target whitelist
     const detected = await detectLang2(sourceText);
