@@ -657,9 +657,9 @@ const effectiveSourceLang = (sourceLang || detected || 'fr').toUpperCase();
     }
 
     // 0) Bypass FR->FR… + “chiffres seuls”
-    if ((effectiveSourceLang||'').toUpperCase() === (targetLang||'').toUpperCase()) {
-      return res.json({ from: 'bypass', text: sourceText });
-    }
+   if ((sourceLang||'').toUpperCase() === (targetLang||'').toUpperCase()) {
+  return res.json({ from: 'bypass', text: sourceText });
+}
     const NUMERIC_RX = /^\s*[\d\s\u00A0.,:+\-/%()]*\s*(?:€|EUR|£|GBP|\$|USD|CHF|¥|JPY|₽|PLN|CZK|HUF|SEK|NOK|DKK)?\s*$/i;
     if (NUMERIC_RX.test(sourceText || '')) {
       return res.json({ from: 'bypass', text: sourceText });
