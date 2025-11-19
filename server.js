@@ -693,48 +693,58 @@ if (DIM_RX.test(sourceText || '')) {
     }
 
     // 1.b) Fallback cache “ancien” (checksum + source_norm)
-    const sumHex = makeChecksum({
+        const sumHex = makeChecksum({
       sourceNorm,
       targetLang,
       selectorHash: selectorHash || ''
     });
     let cachedText = null;
 
-        const hit = await pool.query(
-      `SELECT translated_text FROM translations
-       WHERE project_id=$1 AND source_lang=$2 AND target_lang=$3
-         AND checksum=decode($4,'hex')
-         AND is_template = false`,            
+    // On ne prend JAMAIS les gabarits (is_template=true) dans le cache
+    const hit = await pool.query(
+      `SELECT translated_text
+         FROM translations
+        WHERE project_id=$1
+          AND source_lang=$2
+          AND target_lang=$3
+          AND checksum = decode($4,'hex')
+          AND (is_template IS NULL OR is_template = false)
+        LIMIT 1`,
       [projectId, effectiveSourceLang, targetLang, sumHex]
     );
-
     cachedText = hit.rows[0]?.translated_text || null;
 
     if (!cachedText) {
-            const alt = await pool.query(
-        `SELECT translated_text FROM translations
-         WHERE project_id=$1 AND source_lang=$2 AND target_lang=$3
-           AND source_norm=$4
-           AND is_template = false       -- ⬅️ pareil, on ne prend que les vraies traductions
-         ORDER BY updated_at DESC
-         LIMIT 1`,
+      const alt = await pool.query(
+        `SELECT translated_text
+           FROM translations
+          WHERE project_id=$1
+            AND source_lang=$2
+            AND target_lang=$3
+            AND source_norm=$4
+            AND (is_template IS NULL OR is_template = false)
+          ORDER BY updated_at DESC
+          LIMIT 1`,
         [projectId, effectiveSourceLang, targetLang, sourceNorm]
       );
-
       cachedText = alt.rows[0]?.translated_text || null;
     }
 
-        if (cachedText) {
+    if (cachedText) {
       try {
-        await logUsage({ provider:'cache', fromCache:true,
-          chars:(sourceText||'').length, projectId,
-          sourceLang: effectiveSourceLang, targetLang });
+        await logUsage({
+          provider: 'cache',
+          fromCache: true,
+          chars: (sourceText || '').length,
+          projectId,
+          sourceLang: effectiveSourceLang,
+          targetLang
+        });
       } catch {}
 
-      // Sécurité : on enlève tout reste de __TOK0__ / __TOK1__ éventuel
-      const cleaned = (cachedText || '').replace(/__TOK\d+__/g, '').replace(/\s{2,}/g,' ').trim();
-      return res.json({ from:'cache', text: cleaned || sourceText });
+      return res.json({ from: 'cache', text: cachedText });
     }
+
 
 
     // 2) OpenAI uniquement si autorisé (mode = cache+deepl, réutilisé pour IA)
@@ -786,20 +796,21 @@ if (!providerEnabled) {
          pattern_key     = EXCLUDED.pattern_key,
          updated_at      = now()
        RETURNING translated_text`,
-      [
-        projectId,
-        effectiveSourceLang,
-        targetLang,
-        sourceText,                  // ✅ texte FR original
-        normalizeSource(sourceText), // ✅ normalisation du texte FR
-        aiMasked,                    // ✅ traduction masquée avec TOK
-        contextUrl,
-        pageCanonical,
-        selectorHash,
-        sumHex,
-        patternKey
-      ]
-    );
+        [
+    projectId,
+    effectiveSourceLang,
+    targetLang,
+    sourceText,                  // texte FR original
+    normalizeSource(sourceText), // normalisation du texte FR
+    aiMasked,                    // traduction masquée (avec TOK)
+    contextUrl,
+    pageCanonical,
+    selectorHash,
+    sumHex,
+    patternKey
+  ]
+);
+
 
 
 
