@@ -704,7 +704,7 @@ if (DIM_RX.test(sourceText || '')) {
       `SELECT translated_text FROM translations
        WHERE project_id=$1 AND source_lang=$2 AND target_lang=$3
          AND checksum=decode($4,'hex')
-         AND is_template = false`,            -- ⬅️ on ignore les gabarits
+         AND is_template = false`,            
       [projectId, effectiveSourceLang, targetLang, sumHex]
     );
 
