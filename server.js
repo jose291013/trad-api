@@ -215,13 +215,18 @@ const ADMIN_HTML = String.raw`<!doctype html>
       return '<span class="pill '+cls+'">'+status+'</span>';
     }
 
-    function renderRows(items){
+        function renderRows(items){
       const tb = document.querySelector('#grid tbody');
       tb.innerHTML = '';
-      for(const it of items){
-        const tr = document.getElementById('rowTpl').content.firstElementChild.cloneNode(true);
 
-        // Colonne Langs + badge tpl
+      for (const it of items) {
+        const tr = document
+          .getElementById('rowTpl')
+          .content
+          .firstElementChild
+          .cloneNode(true);
+
+        // Colonne 0 : Langs + badge tpl
         tr.children[0].textContent = it.source_lang + '→' + it.target_lang;
         if (it.is_template) {
           const b = document.createElement('span');
@@ -231,76 +236,111 @@ const ADMIN_HTML = String.raw`<!doctype html>
           tr.children[0].appendChild(b);
         }
 
-        // ✅ Colonne Source : textarea éditable
-const tdSource = tr.children[1];
-const srcInput = document.createElement('textarea');
-srcInput.value = it.source_text || '';
-srcInput.rows = 2;
-srcInput.style.width = '100%';
-tdSource.appendChild(srcInput);
+        // Colonne 1 : Source (textarea + éventuel pattern_key)
+        const tdSource = tr.children[1];
+        const srcInput = document.createElement('textarea');
+        srcInput.value = it.source_text || '';
+        srcInput.rows = 2;
+        srcInput.style.width = '100%';
+        tdSource.appendChild(srcInput);
 
-// …puis on ajoute la ligne "pattern:"
-if (it.is_template && it.pattern_key) {
-  const small = document.createElement('div');
-  small.className = 'muted txt-sm';
-  small.textContent = 'pattern: ' + it.pattern_key;
-  tdSource.appendChild(small);
-}
+        if (it.is_template && it.pattern_key) {
+          const small = document.createElement('div');
+          small.className = 'muted txt-sm';
+          small.textContent = 'pattern: ' + it.pattern_key;
+          tdSource.appendChild(small);
+        }
 
-
+        // Colonne 2 : Traduction (textarea)
         const tdTrad = tr.children[2];
-const ta = document.createElement('textarea');
-ta.value = it.translated_text || '';
-ta.style.width = '100%'; ta.rows = 3;
-tdTrad.appendChild(ta);
+        const ta = document.createElement('textarea');
+        ta.value = it.translated_text || '';
+        ta.rows = 3;
+        ta.style.width = '100%';
+        tdTrad.appendChild(ta);
 
-tr.children[3].innerHTML = pill(it.status);
-tr.children[4].textContent = it.page_path || '';
-tr.children[5].textContent = new Date(it.updated_at).toLocaleString();
+        // Colonne 3 : Statut (avec pill)
+        tr.children[3].innerHTML = pill(it.status || 'auto');
 
-const btnSave = document.createElement('button');
-btnSave.textContent = 'Enregistrer';
-btnSave.onclick = async () => {
-  const newText   = ta.value.trim();
-  const newSource = srcInput.value.trim();
-  if (!newText) { alert('Texte de traduction vide.'); return; }
+        // Colonne 4 : Page
+        tr.children[4].textContent = it.page_path || '';
 
-  const r = await fetch('/admin/api/edit', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + token },
-    body: JSON.stringify({
-      id: it.id,
-      newText,
-      newSource
-    })
-  });
+        // Colonne 5 : Date MAJ
+        tr.children[5].textContent = it.updated_at
+          ? new Date(it.updated_at).toLocaleString()
+          : '';
 
-  if (r.ok) { alert('Sauvegardé ✓'); fetchList(); }
-  else { const t = await r.text(); alert('Erreur: ' + t); }
-};
-tr.children[6].appendChild(btnSave);
+        // Colonne 6 : Actions (Enregistrer / Supprimer)
+        const tdActions = tr.children[6];
+
+        const btnSave = document.createElement('button');
+        btnSave.textContent = 'Enregistrer';
+        btnSave.addEventListener('click', async () => {
+          const newText   = ta.value.trim();
+          const newSource = srcInput.value.trim();
+          if (!newText) {
+            alert('Texte de traduction vide.');
+            return;
+          }
+          btnSave.disabled = true;
+          btnSave.textContent = '…';
+
+          try {
+            const r = await fetch('/admin/api/edit', {
+              method: 'POST',
+              headers: {
+                'Content-Type': 'application/json',
+                'Authorization': 'Bearer ' + token
+              },
+              body: JSON.stringify({
+                id: it.id,
+                newText,
+                newSource
+              })
+            });
+            if (!r.ok) throw new Error('HTTP ' + r.status);
+            alert('Sauvegardé.');
+            await fetchList(); // rechargement de la page courante
+          } catch (e) {
+            console.error(e);
+            alert('Erreur lors de la sauvegarde.');
+          } finally {
+            btnSave.disabled = false;
+            btnSave.textContent = 'Enregistrer';
+          }
+        });
+
         const btnDel = document.createElement('button');
-btnDel.textContent = 'Supprimer';
-btnDel.style.marginLeft = '8px';
-btnDel.style.background = '#fce8e6';
-btnDel.onclick = async () => {
-  if (!confirm('Supprimer définitivement cette traduction ?')) return;
-  const r = await fetch('/admin/api/delete', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + token },
-    body: JSON.stringify({ id: it.id })
-  });
-  if (r.ok) {
-    fetchList();
-  } else {
-    const t = await r.text();
-    alert('Erreur suppression: ' + t);
-  }
-};
-tr.children[6].appendChild(btnDel);
+        btnDel.textContent = 'Supprimer';
+        btnDel.style.marginLeft = '6px';
+        btnDel.addEventListener('click', async () => {
+          if (!confirm('Supprimer cette entrée ?')) return;
+          btnDel.disabled = true;
+          btnDel.textContent = '…';
+          try {
+            const r = await fetch('/admin/api/delete', {
+              method: 'POST',
+              headers: {
+                'Content-Type': 'application/json',
+                'Authorization': 'Bearer ' + token
+              },
+              body: JSON.stringify({ id: it.id })
+            });
+            if (!r.ok) throw new Error('HTTP ' + r.status);
+            await fetchList();
+          } catch (e) {
+            console.error(e);
+            alert('Erreur lors de la suppression.');
+          }
+        });
 
+        tdActions.appendChild(btnSave);
+        tdActions.appendChild(btnDel);
+
+        tb.appendChild(tr);
       }
     }
+
 
     function renderMode(mode) {
       const span = document.getElementById('modePill');
