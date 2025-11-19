@@ -231,44 +231,74 @@ const ADMIN_HTML = String.raw`<!doctype html>
           tr.children[0].appendChild(b);
         }
 
-        // ✅ D’abord le texte source…
-        tr.children[1].textContent = it.source_text || '';
+        // ✅ Colonne Source : textarea éditable
+const tdSource = tr.children[1];
+const srcInput = document.createElement('textarea');
+srcInput.value = it.source_text || '';
+srcInput.rows = 2;
+srcInput.style.width = '100%';
+tdSource.appendChild(srcInput);
 
-        // …puis on ajoute la ligne "pattern:"
-        if (it.is_template && it.pattern_key) {
-          const small = document.createElement('div');
-          small.className = 'muted txt-sm';
-          small.textContent = 'pattern: ' + it.pattern_key;
-          tr.children[1].appendChild(small);
-        }
+// …puis on ajoute la ligne "pattern:"
+if (it.is_template && it.pattern_key) {
+  const small = document.createElement('div');
+  small.className = 'muted txt-sm';
+  small.textContent = 'pattern: ' + it.pattern_key;
+  tdSource.appendChild(small);
+}
+
 
         const tdTrad = tr.children[2];
-        const ta = document.createElement('textarea');
-        ta.value = it.translated_text || '';
-        ta.style.width = '100%'; ta.rows = 3;
-        tdTrad.appendChild(ta);
+const ta = document.createElement('textarea');
+ta.value = it.translated_text || '';
+ta.style.width = '100%'; ta.rows = 3;
+tdTrad.appendChild(ta);
 
-        tr.children[3].innerHTML = pill(it.status);
-        tr.children[4].textContent = it.page_path || '';
-        tr.children[5].textContent = new Date(it.updated_at).toLocaleString();
+tr.children[3].innerHTML = pill(it.status);
+tr.children[4].textContent = it.page_path || '';
+tr.children[5].textContent = new Date(it.updated_at).toLocaleString();
 
-        const btnSave = document.createElement('button');
-        btnSave.textContent = 'Enregistrer';
-        btnSave.onclick = async () => {
-          const newText = ta.value.trim();
-          if (!newText) { alert('Texte vide.'); return; }
-          const reviewerEmail = prompt('Votre email (pour l’historique):', '') || 'unknown';
-          const reason = prompt('Motif (optionnel):', '') || null;
-          const r = await fetch('/admin/api/edit', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + token },
-            body: JSON.stringify({ id: it.id, newText, reviewerEmail, reason })
-          });
-          if (r.ok) { alert('Sauvegardé ✓'); fetchList(); }
-          else { const t = await r.text(); alert('Erreur: ' + t); }
-        };
-        tr.children[6].appendChild(btnSave);
-        tb.appendChild(tr);
+const btnSave = document.createElement('button');
+btnSave.textContent = 'Enregistrer';
+btnSave.onclick = async () => {
+  const newText   = ta.value.trim();
+  const newSource = srcInput.value.trim();
+  if (!newText) { alert('Texte de traduction vide.'); return; }
+
+  const r = await fetch('/admin/api/edit', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + token },
+    body: JSON.stringify({
+      id: it.id,
+      newText,
+      newSource
+    })
+  });
+
+  if (r.ok) { alert('Sauvegardé ✓'); fetchList(); }
+  else { const t = await r.text(); alert('Erreur: ' + t); }
+};
+tr.children[6].appendChild(btnSave);
+        const btnDel = document.createElement('button');
+btnDel.textContent = 'Supprimer';
+btnDel.style.marginLeft = '8px';
+btnDel.style.background = '#fce8e6';
+btnDel.onclick = async () => {
+  if (!confirm('Supprimer définitivement cette traduction ?')) return;
+  const r = await fetch('/admin/api/delete', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + token },
+    body: JSON.stringify({ id: it.id })
+  });
+  if (r.ok) {
+    fetchList();
+  } else {
+    const t = await r.text();
+    alert('Erreur suppression: ' + t);
+  }
+};
+tr.children[6].appendChild(btnDel);
+
       }
     }
 
@@ -811,10 +841,6 @@ if (!providerEnabled) {
   ]
 );
 
-
-
-
-
     const templateText = upsertTpl.rows[0]?.translated_text || aiMasked;
     const finalOut = unmaskTokens(templateText, map);
     return res.json({ from:'openai-template', text: finalOut });
@@ -912,16 +938,33 @@ app.get("/admin/api/translations", requireAdmin, async (req, res) => {
 // Edition
 app.post("/admin/api/edit", requireAdmin, async (req, res) => {
   try {
-    const { id, newText } = req.body || {};
-    if (!id || !newText) return res.status(400).json({ error: "Missing id or newText" });
+    const { id, newText, newSource } = req.body || {};
+    if (!id || !newText) {
+      return res.status(400).json({ error: "Missing id or newText" });
+    }
+
+    // On ne touche à source_text / source_norm que si newSource est fourni
+    const src = (newSource && newSource.trim()) || null;
+
     const { rowCount } = await pool.query(
       `UPDATE translations
-          SET translated_text = $1,
-              status = COALESCE(NULLIF(status,''),'approved'),
-              updated_at = now()
-        WHERE id = $2`,
-      [newText, id]
+          SET source_text    = COALESCE($1, source_text),
+              source_norm    = CASE WHEN $1 IS NOT NULL
+                                   THEN $2
+                                   ELSE source_norm
+                              END,
+              translated_text = $3,
+              status         = COALESCE(NULLIF(status,''),'approved'),
+              updated_at     = now()
+        WHERE id = $4`,
+      [
+        src,
+        src ? normalizeSource(src) : null,
+        newText,
+        id
+      ]
     );
+
     if (!rowCount) return res.status(404).json({ error: "Not found" });
     res.json({ ok: true });
   } catch (e) {
@@ -929,6 +972,37 @@ app.post("/admin/api/edit", requireAdmin, async (req, res) => {
     res.status(500).json({ error: e.message });
   }
 });
+
+app.post("/admin/api/delete", requireAdmin, async (req, res) => {
+  try {
+    const { id } = req.body || {};
+    if (!id) return res.status(400).json({ error: "Missing id" });
+
+    // D'abord les révisions (FK)
+    try {
+      await pool.query(
+        "DELETE FROM translation_revisions WHERE translation_id = $1",
+        [id]
+      );
+    } catch (e) {
+      console.warn("Erreur delete translation_revisions", e.message);
+    }
+
+    const { rowCount } = await pool.query(
+      "DELETE FROM translations WHERE id = $1",
+      [id]
+    );
+
+    if (!rowCount) return res.status(404).json({ error: "Not found" });
+
+    res.json({ ok: true });
+  } catch (e) {
+    console.error(e);
+    res.status(500).json({ error: e.message });
+  }
+});
+
+
 
 // === Front-cache invalidation (nonce) ===
 let CACHE_NONCE = 1;
