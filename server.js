@@ -657,7 +657,8 @@ const effectiveSourceLang = (sourceLang || detected || 'fr').toUpperCase();
     }
 
     // 0.b) Bypass pour les dimensions du type "55 x 85", "60x90 mm", etc.
-const DIM_RX = /^\s*\d[\d\s.,]*\s*[x×]\s*\d[\d\s.,]*\s*(mm|cm|m)?\s*$/i;
+const DIM_RX = /^\s*\d[\d\s.,]*\s*[x×]\s*\d[\d\s.,]*\s*(mm|cm|m)?\s*\.?\s*$/i;
+
 if (DIM_RX.test(sourceText || '')) {
   return res.json({ from: 'bypass', text: sourceText });
 }
@@ -782,9 +783,9 @@ const upsertTpl = await pool.query(
     projectId,
     effectiveSourceLang,
     targetLang,
-    sourceText,                  // 👈 TEXTE ORIGINAL (plus de TOK ici)
-    normalizeSource(sourceText), // 👈 normalisation du texte original
-    aiMasked,                    // 👈 traduction masquée avec TOK
+    sourceText,                  // ✅ texte original FR, SANS TOK
+    normalizeSource(sourceText), // ✅ normalisation du texte original
+    aiMasked,                    // traduction masquée (avec TOK)
     contextUrl,
     pageCanonical,
     selectorHash,
@@ -792,6 +793,7 @@ const upsertTpl = await pool.query(
     patternKey
   ]
 );
+
 
 
     const templateText = upsertTpl.rows[0]?.translated_text || aiMasked;
