@@ -362,28 +362,45 @@ const ADMIN_HTML = String.raw`<!doctype html>
       }
     }
 
-    async function loadStats(){
+    // ==== Paramètres coût tokens (à ajuster) ====
+    // Prix en USD par 1 000 tokens (exemple pour GPT-4.1 mini, à vérifier sur https://openai.com/api/pricing)
+    const PRICE_IN_PER_1K  = 0.0004;  // 0,40 $ / 1M input  = 0,0004 $ / 1k
+    const PRICE_OUT_PER_1K = 0.0016;  // 1,60 $ / 1M output = 0,0016 $ / 1k
+
+        async function loadStats(){
       try{
-        const r = await fetch('/admin/stats', { headers: { 'Authorization':'Bearer '+token } });
+        const r = await fetch('/admin/stats', {
+          headers: { 'Authorization':'Bearer '+token }
+        });
         if(!r.ok) throw new Error('HTTP '+r.status);
         const js = await r.json();
         const today = js.today || {};
-        const calls = Number(today.deepl_calls || 0);
-        const chars = Number(today.deepl_chars || 0);
-        const hits  = Number(today.cache_hits  || 0);
-        const miss  = Number(today.cache_miss  || 0);
+
+        const calls   = Number(today.openai_calls     || 0);
+        const tokensP = Number(today.tokens_prompt    || 0);
+        const tokensC = Number(today.tokens_completion|| 0);
+        const tokensT = Number(today.tokens_total     || 0);
+        const hits    = Number(today.cache_hits       || 0);
+        const miss    = Number(today.cache_miss       || 0);
+
+        // Coût estimé (en USD) sur la journée
+        const costInUSD  = (tokensP / 1000) * PRICE_IN_PER_1K;
+        const costOutUSD = (tokensC / 1000) * PRICE_OUT_PER_1K;
+        const costTotal  = costInUSD + costOutUSD;
+
         const pill = document.getElementById('statsPill');
         pill.textContent =
-          "Aujourd'hui — IA (OpenAI): " + calls +
-          " req / " + chars.toLocaleString() +
-          " car. · Cache: " + hits +
-          " hit / " + miss + " miss";
+          "Aujourd'hui — IA (OpenAI): " +
+          calls + " req / " + tokensT.toLocaleString() + " tokens" +
+          " ≈ " + costTotal.toFixed(4) + " $ " +
+          "· Cache: " + hits + " hit / " + miss + " miss";
       }catch(e){
         console.error(e);
         const pill = document.getElementById('statsPill');
         if(pill) pill.textContent = 'Stats indisponibles';
       }
     }
+
 
     document.getElementById('search').onclick = () => { curPage = 1; fetchList(); };
     document.getElementById('prev').onclick = () => { if (curPage>1){curPage--; fetchList();} };
@@ -520,22 +537,63 @@ async function setMode(v) {
 }
 
 /* ========== Usage metrics ========== */
-async function logUsage({ projectId, sourceLang, targetLang, fromCache, provider, chars }) {
-  const day = new Date().toISOString().slice(0,10);
-  const _chars = Math.max(0, (chars|0));
-  await pool.query(`
+async function logUsage({
+  projectId,
+  sourceLang,
+  targetLang,
+  fromCache,
+  provider,
+  chars,
+  tokensPrompt = 0,
+  tokensCompletion = 0,
+  tokensTotal = 0
+}) {
+  const _chars  = Math.max(0, chars | 0);
+  const _tp     = Math.max(0, tokensPrompt | 0);
+  const _tc     = Math.max(0, tokensCompletion | 0);
+  const _tt     = Math.max(0, tokensTotal | 0);
+
+  await pool.query(
+    `
     INSERT INTO public.usage_stats(
-      day, project_id, source_lang, target_lang, from_cache, provider,
-      chars_count, calls_count, created_at, updated_at
+      day,
+      project_id,
+      source_lang,
+      target_lang,
+      from_cache,
+      provider,
+      chars_count,
+      tokens_prompt,
+      tokens_completion,
+      tokens_total,
+      calls_count,
+      created_at,
+      updated_at
     )
-    VALUES (CURRENT_DATE, $1, $2, $3, $4, $5, $6, 1, now(), now())
+    VALUES (CURRENT_DATE, $1, $2, $3, $4, $5, $6, $7, $8, $9, 1, now(), now())
     ON CONFLICT (day, project_id, source_lang, target_lang, from_cache, provider)
     DO UPDATE SET
-      chars_count = public.usage_stats.chars_count + EXCLUDED.chars_count,
-      calls_count = public.usage_stats.calls_count + 1,
-      updated_at  = now()
-  `, [projectId, sourceLang, targetLang, !!fromCache, provider, _chars]);
+      chars_count       = public.usage_stats.chars_count       + EXCLUDED.chars_count,
+      tokens_prompt     = public.usage_stats.tokens_prompt     + EXCLUDED.tokens_prompt,
+      tokens_completion = public.usage_stats.tokens_completion + EXCLUDED.tokens_completion,
+      tokens_total      = public.usage_stats.tokens_total      + EXCLUDED.tokens_total,
+      calls_count       = public.usage_stats.calls_count       + 1,
+      updated_at        = now()
+    `,
+    [
+      projectId,
+      sourceLang,
+      targetLang,
+      !!fromCache,
+      provider,
+      _chars,
+      _tp,
+      _tc,
+      _tt
+    ]
+  );
 }
+
 
 /* ========== OpenAI (ChatGPT) ========== */
 async function translateWithOpenAI({ text, sourceLang, targetLang }) {
@@ -564,9 +622,15 @@ Réponds uniquement avec le texte traduit, sans guillemets ni commentaire.
     ]
   });
 
-  const out = response.choices?.[0]?.message?.content || "";
-  return out.trim();
+  const out   = response.choices?.[0]?.message?.content || "";
+  const usage = response.usage || null;  // { prompt_tokens, completion_tokens, total_tokens }
+
+  return {
+    text: out.trim(),
+    usage
+  };
 }
+
 
 /* ========== Routes publiques ========== */
 app.get("/health", (_req, res) => res.send("OK"));
@@ -835,17 +899,26 @@ if (!providerEnabled) {
 
     // 3) APPEL OpenAI sur TEXTE MASQUÉ (gabarit)
     const { out: masked, map } = maskNumbersAndUnits(sourceText);
-    const aiMasked = await translateWithOpenAI({
-      text: masked,
-      sourceLang: effectiveSourceLang,
-      targetLang
-    });
+    const { text: aiMasked, usage } = await translateWithOpenAI({
+  text: masked,
+  sourceLang: effectiveSourceLang,
+  targetLang
+});
 
-    try {
-      await logUsage({ provider:'openai', fromCache:false,
-        chars:(sourceText||'').length, projectId,
-        sourceLang: effectiveSourceLang, targetLang });
-    } catch {}
+try {
+  await logUsage({
+    provider: 'openai',
+    fromCache: false,
+    chars: (sourceText || '').length,
+    projectId,
+    sourceLang: effectiveSourceLang,
+    targetLang,
+    tokensPrompt: usage?.prompt_tokens || 0,
+    tokensCompletion: usage?.completion_tokens || 0,
+    tokensTotal: usage?.total_tokens || 0
+  });
+} catch {}
+
 
     // 4) Sauvegarde gabarit (is_template=true, pattern_key)
     const upsertTpl = await pool.query(
@@ -915,18 +988,34 @@ app.post("/admin/mode", requireAdmin, async (req, res) => {
 
 // Stats (agrège usage_stats)
 app.get("/admin/stats", requireAdmin, async (_req, res) => {
-  const { rows: todayRows } = await pool.query(
-    `SELECT
-        SUM( (provider='openai')::int )                               AS deepl_calls,
-        SUM( CASE WHEN provider='openai' THEN chars_count ELSE 0 END ) AS deepl_chars,
-        SUM( (from_cache=true)::int )                                AS cache_hits,
-        SUM( (from_cache=false AND provider<>'openai')::int )        AS cache_miss
-     FROM public.usage_stats
-     WHERE day = CURRENT_DATE`
+  const { rows } = await pool.query(
+    `
+    SELECT
+      SUM( (provider = 'openai')::int ) AS openai_calls,
+      SUM( CASE WHEN provider = 'openai' THEN chars_count       ELSE 0 END ) AS openai_chars,
+      SUM( CASE WHEN provider = 'openai' THEN tokens_prompt     ELSE 0 END ) AS tokens_prompt,
+      SUM( CASE WHEN provider = 'openai' THEN tokens_completion ELSE 0 END ) AS tokens_completion,
+      SUM( CASE WHEN provider = 'openai' THEN tokens_total      ELSE 0 END ) AS tokens_total,
+      SUM( (from_cache = true)::int ) AS cache_hits,
+      SUM( (from_cache = false AND provider <> 'openai')::int ) AS cache_miss
+    FROM public.usage_stats
+    WHERE day = CURRENT_DATE
+    `
   );
-  const today = todayRows[0] || { deepl_calls:0, deepl_chars:0, cache_hits:0, cache_miss:0 };
+
+  const today = rows[0] || {
+    openai_calls: 0,
+    openai_chars: 0,
+    tokens_prompt: 0,
+    tokens_completion: 0,
+    tokens_total: 0,
+    cache_hits: 0,
+    cache_miss: 0
+  };
+
   res.json({ today });
 });
+
 
 // Liste paginée
 app.get("/admin/api/translations", requireAdmin, async (req, res) => {
