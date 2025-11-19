@@ -700,35 +700,42 @@ if (DIM_RX.test(sourceText || '')) {
     });
     let cachedText = null;
 
-    const hit = await pool.query(
+        const hit = await pool.query(
       `SELECT translated_text FROM translations
        WHERE project_id=$1 AND source_lang=$2 AND target_lang=$3
          AND checksum=decode($4,'hex')
-       LIMIT 1`,
+         AND is_template = false`,            -- ⬅️ on ignore les gabarits
       [projectId, effectiveSourceLang, targetLang, sumHex]
     );
+
     cachedText = hit.rows[0]?.translated_text || null;
 
     if (!cachedText) {
-      const alt = await pool.query(
+            const alt = await pool.query(
         `SELECT translated_text FROM translations
          WHERE project_id=$1 AND source_lang=$2 AND target_lang=$3
            AND source_norm=$4
+           AND is_template = false       -- ⬅️ pareil, on ne prend que les vraies traductions
          ORDER BY updated_at DESC
          LIMIT 1`,
         [projectId, effectiveSourceLang, targetLang, sourceNorm]
       );
+
       cachedText = alt.rows[0]?.translated_text || null;
     }
 
-    if (cachedText) {
+        if (cachedText) {
       try {
         await logUsage({ provider:'cache', fromCache:true,
           chars:(sourceText||'').length, projectId,
           sourceLang: effectiveSourceLang, targetLang });
       } catch {}
-      return res.json({ from:'cache', text: cachedText });
+
+      // Sécurité : on enlève tout reste de __TOK0__ / __TOK1__ éventuel
+      const cleaned = (cachedText || '').replace(/__TOK\d+__/g, '').replace(/\s{2,}/g,' ').trim();
+      return res.json({ from:'cache', text: cleaned || sourceText });
     }
+
 
     // 2) OpenAI uniquement si autorisé (mode = cache+deepl, réutilisé pour IA)
     // 2) Appel provider externe uniquement si autorisé
@@ -761,38 +768,39 @@ if (!providerEnabled) {
     } catch {}
 
     // 4) Sauvegarde gabarit (is_template=true, pattern_key)
-const upsertTpl = await pool.query(
-  `INSERT INTO translations(
-     project_id, source_lang, target_lang,
-     source_text, source_norm, translated_text,
-     context_url, page_path, selector_hash, checksum, status,
-     is_template, pattern_key
-   ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,decode($10,'hex'),'auto', true, $11)
-   ON CONFLICT (project_id, source_lang, target_lang, source_norm)
-   DO UPDATE SET
-     translated_text = COALESCE(EXCLUDED.translated_text, translations.translated_text),
-     context_url     = COALESCE(EXCLUDED.context_url,     translations.context_url),
-     page_path       = COALESCE(EXCLUDED.page_path,       translations.page_path),
-     selector_hash   = COALESCE(EXCLUDED.selector_hash,   translations.selector_hash),
-     checksum        = EXCLUDED.checksum,
-     is_template     = true,
-     pattern_key     = EXCLUDED.pattern_key,
-     updated_at      = now()
-   RETURNING translated_text`,
-  [
-    projectId,
-    effectiveSourceLang,
-    targetLang,
-    sourceText,                  // ✅ texte original FR, SANS TOK
-    normalizeSource(sourceText), // ✅ normalisation du texte original
-    aiMasked,                    // traduction masquée (avec TOK)
-    contextUrl,
-    pageCanonical,
-    selectorHash,
-    sumHex,
-    patternKey
-  ]
-);
+    const upsertTpl = await pool.query(
+      `INSERT INTO translations(
+         project_id, source_lang, target_lang,
+         source_text, source_norm, translated_text,
+         context_url, page_path, selector_hash, checksum, status,
+         is_template, pattern_key
+       ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,decode($10,'hex'),'auto', true, $11)
+       ON CONFLICT (project_id, source_lang, target_lang, source_norm)
+       DO UPDATE SET
+         translated_text = COALESCE(EXCLUDED.translated_text, translations.translated_text),
+         context_url     = COALESCE(EXCLUDED.context_url,     translations.context_url),
+         page_path       = COALESCE(EXCLUDED.page_path,       translations.page_path),
+         selector_hash   = COALESCE(EXCLUDED.selector_hash,   translations.selector_hash),
+         checksum        = EXCLUDED.checksum,
+         is_template     = true,
+         pattern_key     = EXCLUDED.pattern_key,
+         updated_at      = now()
+       RETURNING translated_text`,
+      [
+        projectId,
+        effectiveSourceLang,
+        targetLang,
+        sourceText,                  // ✅ texte FR original
+        normalizeSource(sourceText), // ✅ normalisation du texte FR
+        aiMasked,                    // ✅ traduction masquée avec TOK
+        contextUrl,
+        pageCanonical,
+        selectorHash,
+        sumHex,
+        patternKey
+      ]
+    );
+
 
 
 
